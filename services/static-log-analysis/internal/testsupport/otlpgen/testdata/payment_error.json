@@ -1,0 +1,20 @@
+{
+  "severity_number": 17,
+  "severity_text": "ERROR",
+  "body": "charge failed for order 4711: card declined",
+  "event_time_unix_nano": 1767225598000000000,
+  "observed_time_unix_nano": 1767225600000000000,
+  "trace_id": "4bf92f3577b34da60000000000000001",
+  "span_id": "00f067aa0ba90001",
+  "attributes": {
+    "exception.message": "card declined by acme for request 8f2c1d, customer 90210",
+    "exception.stacktrace": "PaymentDeclined: card declined\n  at charge (payment/charge.go:118)\n  at handleCharge (payment/handler.go:64)\n  at (*mux).ServeHTTP (net/http/server.go:2938)",
+    "exception.type": "PaymentDeclined",
+    "http.route": "/api/payments/{id}",
+    "log.record.uid": "019b76da-a800-7000-a220-a8397b1dcdaf",
+    "payment.amount": "42.5",
+    "payment.currency": "USD",
+    "payment.provider": "acme",
+    "request.id": "8f2c1d"
+  }
+}

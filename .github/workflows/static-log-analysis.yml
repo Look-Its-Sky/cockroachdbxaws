@@ -1,0 +1,65 @@
+name: static-log-analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: services/static-log-analysis
+
+jobs:
+  # Fast gate: unit, fixture, and property tests. Runs on every change.
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: services/static-log-analysis/go.mod
+          cache-dependency-path: services/static-log-analysis/go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        # Both tag sets: without the second pass, a mistake in an
+        # integration-tagged file is invisible until the integration job runs,
+        # and invisible entirely if that job is ever skipped.
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: Test
+        # UPDATE_GOLDEN is deliberately unset: a fixture must never be rewritten
+        # by the gate that is supposed to be checking it.
+        run: go test ./...
+
+      - name: Check that nothing was regenerated
+        # Catches a golden fixture or generated file that was changed by the
+        # test run but not committed.
+        run: git diff --exit-code
+
+  # Storage and concurrency gate: real Pebble and real CockroachDB, race
+  # detector on. REQUIRE_DOCKER turns an unavailable container into a failure,
+  # so this job cannot silently degrade into skipped tests.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: services/static-log-analysis/go.mod
+          cache-dependency-path: services/static-log-analysis/go.sum
+
+      - name: Test with race detector
+        env:
+          REQUIRE_DOCKER: "1"
+        run: go test -race -tags=integration -timeout=20m ./...

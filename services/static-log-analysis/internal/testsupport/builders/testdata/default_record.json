@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "record_id": "6e0be036fe03c475ec21e84346f2285e96e4f19ccfc48512d5b9f6b0528fd32a",
+  "record_id_version": "otlp:v1",
+  "identity_quality": "native",
+  "batch_id": "019b76da-a800-7001-ae78-9e6aa1b965f4",
+  "source": {
+    "source_type": "otlp",
+    "source_account": "000000000001",
+    "region": "us-east-1",
+    "allowed_environments": [
+      "production"
+    ],
+    "allowed_services": [
+      "paymentservice"
+    ],
+    "source_instance": "collector-us-east-1-0",
+    "credential_identity": "spiffe://example.internal/ns/observability/sa/collector",
+    "received_at": "2026-01-01T00:00:00Z"
+  },
+  "region": "us-east-1",
+  "event_time": "2025-12-31T23:59:58Z",
+  "observed_time": "2026-01-01T00:00:00Z",
+  "timestamp_inferred": false,
+  "severity_number": 17,
+  "severity_text": "ERROR",
+  "severity_class": "error",
+  "body": {
+    "kind": "string",
+    "value": "charge failed for order"
+  },
+  "attributes": {
+    "http.route": {
+      "kind": "string",
+      "value": "/api/payments/{id}"
+    },
+    "payment.provider": {
+      "kind": "string",
+      "value": "acme"
+    }
+  },
+  "resource_attributes": {
+    "cloud.region": {
+      "kind": "string",
+      "value": "us-east-1"
+    },
+    "deployment.environment.name": {
+      "kind": "string",
+      "value": "production"
+    },
+    "service.name": {
+      "kind": "string",
+      "value": "paymentservice"
+    }
+  },
+  "service": {
+    "name": "paymentservice",
+    "instance_id": "paymentservice-0",
+    "environment": "production",
+    "status": "available"
+  },
+  "deployment": {
+    "id": "paymentservice-7f4c9a1",
+    "version": "2026.3.4",
+    "status": "available"
+  },
+  "correlation": {},
+  "redaction": {
+    "policy_version": "1.0"
+  }
+}
