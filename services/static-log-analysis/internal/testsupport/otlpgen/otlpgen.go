@@ -27,6 +27,13 @@ import (
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/testsupport/testids"
 )
 
+// Record and ExportRequest are the OTLP types this package produces, aliased so
+// that a test naming them does not have to import the generated packages.
+type (
+	Record        = logs.LogRecord
+	ExportRequest = collectorlogs.ExportLogsServiceRequest
+)
+
 // RecordUIDAttribute is the attribute a direct OTLP producer sets before its
 // first export attempt. Pairing it with the authenticated source envelope is
 // what makes record identity stable across a retry.
