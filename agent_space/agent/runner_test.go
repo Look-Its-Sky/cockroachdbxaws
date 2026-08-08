@@ -217,8 +217,11 @@ func TestRunFeedsBadArgumentsBackToModel(t *testing.T) {
 	}
 }
 
-func TestRunReportsToolLevelErrorWithoutFailing(t *testing.T) {
-	// A refused write is the server's answer, not a transport failure.
+func TestRunRecordsToolLevelErrorAsFailedButContinues(t *testing.T) {
+	// A refused query is the server's answer, not a transport failure: the run
+	// carries on and the model reads the rejection. But the step is a failure,
+	// and the trace has to say so — a live run once made six calls against a
+	// database that did not exist and reported every one as a success.
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "DROP TABLE incidents"}`),
 		textResponse("HOTFIX. The implicated commit is d4b8f31."),
@@ -233,11 +236,15 @@ func TestRunReportsToolLevelErrorWithoutFailing(t *testing.T) {
 	if len(res.Trace) != 1 {
 		t.Fatalf("Trace has %d steps, want 1", len(res.Trace))
 	}
-	if res.Trace[0].Failed {
-		t.Error("a tool-level rejection was recorded as a step failure")
+	if !res.Trace[0].Failed {
+		t.Error("a tool-level rejection was recorded as a successful step")
 	}
+	// The rejection must still reach the model, or it cannot correct itself.
 	if !strings.Contains(res.Trace[0].Output, "only SELECT statements are permitted") {
 		t.Errorf("step output = %q, want the server's rejection", res.Trace[0].Output)
+	}
+	if res.Answer != "HOTFIX. The implicated commit is d4b8f31." {
+		t.Errorf("Answer = %q, want the run to continue past the rejection", res.Answer)
 	}
 }
 

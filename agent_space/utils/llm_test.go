@@ -5,17 +5,16 @@ import (
 	"testing"
 )
 
-// clearLLMEnv blanks every variable the resolvers read, so each case starts
-// from a known state regardless of the developer's real .env.
+// clearLLMEnv blanks every variable the resolvers read, plus the retired ones,
+// so each case starts from a known state regardless of the developer's real
+// .env.
 func clearLLMEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"OPENAI_BASE_URL",
+		"OPENAI_BASE_URL", "EMBEDDING_BASE_URL",
 		"OPENROUTER_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY",
-		"OPENROUTER_MODEL", "LLM_MODEL", "OPENAI_MODEL",
-		"OPENROUTER_EMBEDDING_MODEL", "LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL",
-		"OPENROUTER_EMBEDDING_DIMENSIONS", "LLM_EMBEDDING_DIMENSIONS", "OPENAI_EMBEDDING_DIMENSIONS",
-		"VECTOR_DIMENSIONS",
+		"OPENROUTER_MODEL", "OPENROUTER_EMBEDDING_MODEL",
+		"OPENROUTER_EMBEDDING_DIMENSIONS", "VECTOR_DIMENSIONS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -54,61 +53,86 @@ func TestSelfHostedDetection(t *testing.T) {
 	}
 }
 
-// This is the whole point of the change: a leftover OpenRouter configuration
-// must not reach a self-hosted endpoint. Sending "z-ai/glm-5.2" to Ollama is a
-// confusing 404, and sending the real OpenRouter key to an arbitrary local
-// process leaks a live credential.
-func TestSelfHostedOverridesOpenRouterSettings(t *testing.T) {
-	openRouterEnv(t)
-	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
-	t.Setenv("LLM_MODEL", "qwen2.5-coder:32b")
-	t.Setenv("LLM_EMBEDDING_MODEL", "nomic-embed-text")
+// One variable names the chat model wherever it runs. Previously OPENROUTER_MODEL
+// was ignored the moment OPENAI_BASE_URL was set, which meant two names for one
+// setting and a silent fallback when only one of them was filled in.
+func TestChatModelUsesOneVariableForBothProviders(t *testing.T) {
+	clearLLMEnv(t)
+	t.Setenv("OPENROUTER_MODEL", "qwen2.5-coder:32b")
 
 	if got := ChatModel(); got != "qwen2.5-coder:32b" {
-		t.Errorf("ChatModel() = %q, want the local model to win", got)
-	}
-	if got := EmbeddingModel(); got != "nomic-embed-text" {
-		t.Errorf("EmbeddingModel() = %q, want the local model to win", got)
+		t.Errorf("ChatModel() = %q against OpenRouter", got)
 	}
 
-	key, err := apiKey()
+	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+	if got := ChatModel(); got != "qwen2.5-coder:32b" {
+		t.Errorf("ChatModel() = %q when self-hosted, want the same variable to win", got)
+	}
+}
+
+// The reason embeddings no longer follow OPENAI_BASE_URL: the vector column is
+// sized to the embedder at CREATE TABLE, so moving chat to a local model must
+// not quietly move the embedder too and invalidate every stored vector.
+func TestEmbeddingsStayOnOpenRouterWhenChatIsSelfHosted(t *testing.T) {
+	openRouterEnv(t)
+	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+
+	if EmbeddingSelfHosted() {
+		t.Error("EmbeddingSelfHosted() = true; OPENAI_BASE_URL must not move embeddings")
+	}
+	if got := EmbeddingBaseURL(); got != openRouterBaseURL {
+		t.Errorf("EmbeddingBaseURL() = %q, want OpenRouter", got)
+	}
+	if got := EmbeddingModel(); got != "qwen/qwen3-embedding-8b" {
+		t.Errorf("EmbeddingModel() = %q, want the OpenRouter embedder", got)
+	}
+	if got := EmbeddingDimensions(); got != 1024 {
+		t.Errorf("EmbeddingDimensions() = %d, want 1024 to survive a local chat endpoint", got)
+	}
+
+	// The billable key reaches OpenRouter for embeddings...
+	key, err := apiKeyFor(EmbeddingBaseURL())
 	if err != nil {
-		t.Fatalf("apiKey: %v", err)
+		t.Fatalf("apiKeyFor(embeddings): %v", err)
+	}
+	if key != "sk-or-secret" {
+		t.Errorf("apiKeyFor(embeddings) = %q, want the OpenRouter key", key)
+	}
+
+	// ...and never reaches the local chat endpoint.
+	key, err = apiKeyFor(BaseURL())
+	if err != nil {
+		t.Fatalf("apiKeyFor(chat): %v", err)
 	}
 	if key == "sk-or-secret" {
 		t.Error("the OpenRouter key was sent to a self-hosted endpoint")
 	}
-
-	// OPENROUTER_EMBEDDING_DIMENSIONS describes OpenRouter, so it must not
-	// decide what a local server receives.
-	if got := EmbeddingDimensions(); got != 0 {
-		t.Errorf("EmbeddingDimensions() = %d, want 0 so the field is omitted", got)
-	}
 }
 
-func TestSelfHostedDefaultsWithoutModelNames(t *testing.T) {
-	openRouterEnv(t)
+func TestSelfHostedDefaultsWithoutModelName(t *testing.T) {
+	clearLLMEnv(t)
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:8080/v1")
 
-	// No LLM_MODEL: fall back to a neutral placeholder rather than an
+	// No OPENROUTER_MODEL: fall back to a neutral placeholder rather than an
 	// OpenRouter name, so servers that ignore the field work and servers that
 	// do not produce a legible error.
 	if got := ChatModel(); got != placeholderModel {
 		t.Errorf("ChatModel() = %q, want %q", got, placeholderModel)
 	}
-	if got := EmbeddingModel(); got != placeholderModel {
-		t.Errorf("EmbeddingModel() = %q, want %q", got, placeholderModel)
-	}
 }
 
-func TestSelfHostedEmbeddingDimensions(t *testing.T) {
+func TestEmbeddingSelfHostedViaEmbeddingBaseURL(t *testing.T) {
 	openRouterEnv(t)
-	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+	t.Setenv("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+	t.Setenv("OPENROUTER_EMBEDDING_DIMENSIONS", "")
 
+	if !EmbeddingSelfHosted() {
+		t.Error("EmbeddingSelfHosted() = false with EMBEDDING_BASE_URL set")
+	}
 	// Suppressed by default, because most local embedding servers reject the
 	// `dimensions` field.
 	if got := EmbeddingDimensions(); got != 0 {
-		t.Errorf("EmbeddingDimensions() = %d, want 0 by default when self-hosted", got)
+		t.Errorf("EmbeddingDimensions() = %d, want 0 so the field is omitted", got)
 	}
 	// The column still has to be sized.
 	t.Setenv("VECTOR_DIMENSIONS", "768")
@@ -117,7 +141,7 @@ func TestSelfHostedEmbeddingDimensions(t *testing.T) {
 	}
 
 	// A server that does accept the field can opt back in explicitly.
-	t.Setenv("LLM_EMBEDDING_DIMENSIONS", "512")
+	t.Setenv("OPENROUTER_EMBEDDING_DIMENSIONS", "512")
 	if got := EmbeddingDimensions(); got != 512 {
 		t.Errorf("EmbeddingDimensions() = %d, want the explicit override", got)
 	}
@@ -131,25 +155,24 @@ func TestSelfHostedUsesLocalKeyWhenProvided(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
 	t.Setenv("LLM_API_KEY", "local-secret")
 
-	key, err := apiKey()
+	key, err := apiKeyFor(BaseURL())
 	if err != nil {
-		t.Fatalf("apiKey: %v", err)
+		t.Fatalf("apiKeyFor: %v", err)
 	}
 	if key != "local-secret" {
-		t.Errorf("apiKey() = %q, want the local key", key)
+		t.Errorf("apiKeyFor() = %q, want the local key", key)
 	}
 }
 
 func TestOpenRouterPathUnchanged(t *testing.T) {
 	openRouterEnv(t)
 
-	// The existing configuration must behave exactly as before.
-	key, err := apiKey()
+	key, err := apiKeyFor(BaseURL())
 	if err != nil {
-		t.Fatalf("apiKey: %v", err)
+		t.Fatalf("apiKeyFor: %v", err)
 	}
 	if key != "sk-or-secret" {
-		t.Errorf("apiKey() = %q, want the OpenRouter key", key)
+		t.Errorf("apiKeyFor() = %q, want the OpenRouter key", key)
 	}
 	if got := ChatModel(); got != "z-ai/glm-5.2" {
 		t.Errorf("ChatModel() = %q, want the OpenRouter model", got)
@@ -174,16 +197,6 @@ func TestOpenRouterDefaults(t *testing.T) {
 	if got := EmbeddingDimensions(); got != DefaultEmbeddingDimensions {
 		t.Errorf("EmbeddingDimensions() = %d, want the default", got)
 	}
-
-	// The generic names still work when the OpenRouter ones are absent.
-	t.Setenv("LLM_MODEL", "some/model")
-	t.Setenv("LLM_EMBEDDING_MODEL", "some/embedder")
-	if got := ChatModel(); got != "some/model" {
-		t.Errorf("ChatModel() = %q, want the LLM_MODEL fallback", got)
-	}
-	if got := EmbeddingModel(); got != "some/embedder" {
-		t.Errorf("EmbeddingModel() = %q, want the LLM_EMBEDDING_MODEL fallback", got)
-	}
 }
 
 func TestAPIKeyRequiredOnlyForOpenRouter(t *testing.T) {
@@ -191,19 +204,18 @@ func TestAPIKeyRequiredOnlyForOpenRouter(t *testing.T) {
 
 	// Against OpenRouter a missing key is a real error — failing at boot beats
 	// failing on the first request.
-	if _, err := apiKey(); err == nil {
-		t.Error("apiKey() with no key against OpenRouter succeeded, want an error")
+	if _, err := apiKeyFor(openRouterBaseURL); err == nil {
+		t.Error("apiKeyFor(OpenRouter) with no key succeeded, want an error")
 	}
 
 	// Against a self-hosted server it is not: most ignore the header entirely,
 	// and demanding a meaningless secret would be pure friction.
-	t.Setenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-	got, err := apiKey()
+	got, err := apiKeyFor("http://localhost:8000/v1")
 	if err != nil {
-		t.Fatalf("apiKey() against a self-hosted endpoint: %v", err)
+		t.Fatalf("apiKeyFor() against a self-hosted endpoint: %v", err)
 	}
 	if got == "" {
-		t.Error("apiKey() returned an empty key; the OpenAI protocol still needs the header")
+		t.Error("apiKeyFor() returned an empty key; the OpenAI protocol still needs the header")
 	}
 }
 
@@ -211,7 +223,7 @@ func TestEmbeddingDimensionsInvalidValues(t *testing.T) {
 	for _, raw := range []string{"-8", "big", "1.5"} {
 		t.Run(raw, func(t *testing.T) {
 			clearLLMEnv(t)
-			t.Setenv("LLM_EMBEDDING_DIMENSIONS", raw)
+			t.Setenv("OPENROUTER_EMBEDDING_DIMENSIONS", raw)
 			if got := EmbeddingDimensions(); got != DefaultEmbeddingDimensions {
 				t.Errorf("EmbeddingDimensions(%q) = %d, want the default", raw, got)
 			}
@@ -221,7 +233,7 @@ func TestEmbeddingDimensionsInvalidValues(t *testing.T) {
 
 func TestVectorDimensionsFallsBackWhenSuppressed(t *testing.T) {
 	clearLLMEnv(t)
-	t.Setenv("LLM_EMBEDDING_DIMENSIONS", "0")
+	t.Setenv("OPENROUTER_EMBEDDING_DIMENSIONS", "0")
 
 	// Suppressed and unstated: fall back rather than create a 0-width column.
 	if got := VectorDimensions(); got != DefaultEmbeddingDimensions {
@@ -247,11 +259,11 @@ func TestDescribeLLM(t *testing.T) {
 		t.Errorf("DescribeLLM() leaks the API key: %q", got)
 	}
 
+	// Split providers: the line has to show both, or a local chat endpoint that
+	// is not being picked up looks identical to one that is.
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
-	t.Setenv("LLM_MODEL", "qwen2.5-coder:32b")
-	t.Setenv("VECTOR_DIMENSIONS", "768")
 	got = DescribeLLM()
-	for _, want := range []string{"self-hosted", "localhost:11434", "qwen2.5-coder:32b", "dimensions omitted", "768"} {
+	for _, want := range []string{"self-hosted", "localhost:11434", "z-ai/glm-5.2", "OpenRouter", "qwen/qwen3-embedding-8b"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("DescribeLLM() = %q, missing %q", got, want)
 		}

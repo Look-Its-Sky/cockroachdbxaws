@@ -89,28 +89,48 @@ func (t *Tool) Call(ctx context.Context, input string) (string, error) {
 	return t.Invoke(ctx, args)
 }
 
-// Invoke calls the remote tool with already-structured arguments.
+// Result is the outcome of one tool call. IsError distinguishes "the tool ran
+// and said no" from "the tool ran and answered" — both of which come back as
+// text the model can read, and neither of which is a Go error.
+type Result struct {
+	Text    string
+	IsError bool
+}
+
+// Invoke calls the remote tool with already-structured arguments, returning
+// just the text. Callers that need to know whether the tool itself reported a
+// failure should use InvokeResult: a rejected query and a successful one are
+// indistinguishable here, which is fine for feeding the model and wrong for
+// anything that counts failures.
+func (t *Tool) Invoke(ctx context.Context, args map[string]any) (string, error) {
+	res, err := t.InvokeResult(ctx, args)
+	return res.Text, err
+}
+
+// InvokeResult calls the remote tool and reports whether the tool rejected the
+// call.
 //
 // A tool that reports failure (a rejected query, a missing table) comes back as
-// ordinary text, not a Go error: the model needs to read it to correct itself.
-// Only transport and protocol failures return an error.
-func (t *Tool) Invoke(ctx context.Context, args map[string]any) (string, error) {
+// ordinary text rather than a Go error: the model needs to read it to correct
+// itself, and aborting the run would deny it that chance. Only transport and
+// protocol failures return an error.
+func (t *Tool) InvokeResult(ctx context.Context, args map[string]any) (Result, error) {
 	res, err := t.session.session.CallTool(ctx, &sdk.CallToolParams{
 		Name:      t.remote.Name,
 		Arguments: args,
 	})
 	if err != nil {
-		return "", fmt.Errorf("mcp: call %s: %w", t.remote.Name, err)
+		return Result{}, fmt.Errorf("mcp: call %s: %w", t.remote.Name, err)
 	}
 
 	out := flattenContent(res)
 	if res.IsError {
-		return "Tool reported an error: " + out, nil
+		return Result{Text: "Tool reported an error: " + out, IsError: true}, nil
 	}
 	if out == "" {
-		return "(tool returned no content)", nil
+		return Result{Text: "(tool returned no content)"}, nil
 	}
-	return truncate(out, maxResultChars), nil
+	return Result{Text: truncate(out, maxResultChars)}, nil
 }
 
 // flattenContent renders an MCP result as text, preferring the content blocks

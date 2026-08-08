@@ -10,6 +10,11 @@
 set -euo pipefail
 
 API_URL="${API_URL:-http://localhost:8080}"
+
+# The protected routes need the shared secret when the server sets API_TOKEN.
+# Empty array when unset, so local runs stay argument-free.
+AUTH=()
+[ -n "${API_TOKEN:-}" ] && AUTH=(-H "X-Agent-Token: $API_TOKEN")
 PACE="${PACE:-2}"
 
 pause() { [ "$PACE" != "0" ] && sleep "$PACE" || true; }
@@ -37,7 +42,7 @@ pretty() {
 }
 
 post() {
-  curl -sS -X POST "$API_URL$1" -H 'Content-Type: application/json' -d "$2"
+  curl -sS -X POST "$API_URL$1" -H 'Content-Type: application/json' "${AUTH[@]}" -d "$2"
 }
 
 # mcp_ready reports whether the MCP handshake succeeded, so the demo can say

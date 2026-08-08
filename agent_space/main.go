@@ -134,10 +134,15 @@ func main() {
 
 	router := gin.Default()
 
+	// Gate every route that costs money, mutates state, or reads stored
+	// incidents back out. Only /ping and /tools stay open — free, read-only,
+	// and the ones worth demonstrating.
+	guarded := router.Group("", utils.RequireToken())
+
 	router.GET("/ping", utils.Ping)
 
 	// Endpoint to store text into the vector database
-	router.POST("/store", func(c *gin.Context) {
+	guarded.POST("/store", func(c *gin.Context) {
 		var req struct {
 			Text string `json:"text" binding:"required"`
 		}
@@ -162,7 +167,7 @@ func main() {
 	})
 
 	// Endpoint to retrieve similar text from the vector database
-	router.POST("/retrieve", func(c *gin.Context) {
+	guarded.POST("/retrieve", func(c *gin.Context) {
 		var req struct {
 			Query string `json:"query" binding:"required"`
 			Limit int    `json:"limit"`
@@ -193,7 +198,7 @@ func main() {
 
 	// Endpoint to answer a question using the stored context as grounding.
 	// This is the smallest end-to-end exercise of embed -> retrieve -> generate.
-	router.POST("/ask", func(c *gin.Context) {
+	guarded.POST("/ask", func(c *gin.Context) {
 		var req struct {
 			Question string `json:"question" binding:"required"`
 			Limit    int    `json:"limit"`
@@ -280,7 +285,7 @@ func main() {
 	// Endpoint running the full SRE loop: recall similar past incidents from
 	// the vector index, query the live cluster over MCP, then decide rollback
 	// or hotfix. /ask remains the one-shot path; this is the agentic one.
-	router.POST("/agent", func(c *gin.Context) {
+	guarded.POST("/agent", func(c *gin.Context) {
 		if sreAgent == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": mcpUnavailable})
 			return

@@ -33,8 +33,12 @@ const (
 	maxToolOutputChars = 4000
 
 	// completionBudget must leave room for reasoning models that spend
-	// completion tokens before emitting any content.
-	completionBudget = 2000
+	// completion tokens before emitting any content. At 2000, one iteration in
+	// twenty ended with finish_reason "length" mid-reasoning and emitted no
+	// tool call at all — the budget ran out before the model got to the part
+	// that matters. Failing that way is silent, so the headroom is worth more
+	// than the tokens.
+	completionBudget = 4000
 )
 
 // systemPrompt states the decision rule the project exists to automate. The
@@ -257,12 +261,18 @@ func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) 
 	}
 	step.Arguments = args
 
-	out, err := tool.Invoke(ctx, args)
-	if err != nil {
+	res, err := tool.InvokeResult(ctx, args)
+	switch {
+	case err != nil:
 		step.Failed = true
 		step.Output = "Tool call failed: " + err.Error()
-	} else {
-		step.Output = clip(out, maxToolOutputChars)
+	default:
+		// A tool that ran and rejected the call is still a failed step. The
+		// model gets the text either way, but a trace that calls this a
+		// success hides exactly the pattern worth seeing — six calls against a
+		// database that does not exist read as a clean run otherwise.
+		step.Failed = res.IsError
+		step.Output = clip(res.Text, maxToolOutputChars)
 	}
 
 	step.DurationMS = elapsedMS(start)

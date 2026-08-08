@@ -42,6 +42,10 @@ OUTFILE=""
 TIMEOUT=900
 SEED=0
 
+# The protected routes need the shared secret when the server sets API_TOKEN.
+AUTH=()
+[ -n "${API_TOKEN:-}" ] && AUTH=(-H "X-Agent-Token: $API_TOKEN")
+
 usage() { sed -n '2,28p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0; }
 
 while getopts ":u:n:w:e:q:l:o:m:sh" opt; do
@@ -87,9 +91,9 @@ call() {
   body="$(payload "$ep")"
 
   if [ -z "$body" ]; then
-    curl -sS -m "$TIMEOUT" -o "$out" -w '%{time_total} %{http_code}' "$API_URL/$ep" || echo "0 000"
+    curl -sS -m "$TIMEOUT" -o "$out" -w '%{time_total} %{http_code}' "${AUTH[@]}" "$API_URL/$ep" || echo "0 000"
   else
-    curl -sS -m "$TIMEOUT" -o "$out" -w '%{time_total} %{http_code}' \
+    curl -sS -m "$TIMEOUT" -o "$out" -w '%{time_total} %{http_code}' "${AUTH[@]}" \
       -X POST "$API_URL/$ep" -H 'Content-Type: application/json' -d "$body" || echo "0 000"
   fi
 }
@@ -121,7 +125,7 @@ if [ "$SEED" = "1" ]; then
   echo "Seeding:   two incident rows"
   while IFS= read -r text; do
     curl -sS -m 60 -o /dev/null -X POST "$API_URL/store" -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg t "$text" '{text: $t}')"
+      "${AUTH[@]}" -d "$(jq -n --arg t "$text" '{text: $t}')"
   done <<'EOF'
 INC-412: checkout latency spiked to 8s after commit a91f3c2 added a synchronous fraud-check call in the request path. Rolled back; the proper async fix could not land same-day.
 INC-388: 500s on /cart after commit 77bd10e introduced a null map write. Hotfixed in 40 minutes with a one-line nil guard; no rollback needed.
@@ -193,6 +197,12 @@ jq -rs --arg label "$LABEL" '
     | (($c / 100 | floor | tostring) + "."
        + (($c % 100 | tostring) | if length == 1 then "0" + . else . end) + "s");
   def mean: if length == 0 then 0 else (add / length) end;
+  # Two significant figures below 1%, so a genuinely tiny share reads as
+  # "0.01%" rather than rounding to a flattering "0%".
+  def pct($total): (. / $total * 100) as $p
+    | if $p >= 1 then (($p * 10 | round) / 10 | tostring)
+      elif $p > 0 then (($p * 100 | round) / 100 | tostring)
+      else "0" end;
   def median: sort | length as $n
     | if $n == 0 then 0
       elif $n % 2 == 1 then .[($n - 1) / 2]
@@ -230,11 +240,11 @@ jq -rs --arg label "$LABEL" '
             "/agent breakdown (mean of \($a | length) runs)",
             "-" * 72,
             "  MCP tool calls   " + ($tool | secs | lpad(8))
-              + ("  \((($tool / $total * 1000) | round) / 10)%" | lpad(8))
+              + ("  \($tool | pct($total))%" | lpad(8))
               + "   \((($a | map(.tool_calls) | mean * 10 | round) / 10)) calls, "
               + "\($a | map(.tool_failures) | add) failed",
             "  model + overhead " + ($model | secs | lpad(8))
-              + ("  \((($model / $total * 1000) | round) / 10)%" | lpad(8))
+              + ("  \($model | pct($total))%" | lpad(8))
               + "   \((($a | map(.iterations // 0) | mean * 10 | round) / 10)) iterations",
             (if $model > $tool * 10 then
                "",

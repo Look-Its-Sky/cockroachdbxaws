@@ -121,9 +121,7 @@ func main() {
 
 	utils.LoadConfig()
 	if *modelName != "" {
-		// Set both names so the override lands whichever provider is active.
 		os.Setenv("OPENROUTER_MODEL", *modelName)
-		os.Setenv("LLM_MODEL", *modelName)
 	}
 
 	active := utils.ChatModel()

@@ -48,22 +48,36 @@ func warn(key, format string, args ...any) {
 	}
 }
 
-// SelfHosted reports whether a non-OpenRouter endpoint is configured.
-//
-// OPENAI_BASE_URL is the single switch for the whole provider: when it is set,
-// the LLM_* / OPENAI_* settings take precedence over the OPENROUTER_* ones, so
-// an existing OpenRouter configuration left in .env cannot leak a model name or
-// key into requests aimed at a local server.
+// SelfHosted reports whether chat is pointed at a non-OpenRouter endpoint.
 func SelfHosted() bool {
 	return os.Getenv("OPENAI_BASE_URL") != ""
 }
 
-// BaseURL returns the OpenAI-compatible endpoint to talk to.
+// BaseURL returns the endpoint chat completions are sent to.
 func BaseURL() string {
 	return EnvOr("OPENAI_BASE_URL", openRouterBaseURL)
 }
 
-// EnvOr returns the environment variable named by key, or fallback if unset.
+// EmbeddingBaseURL returns the endpoint embeddings are sent to.
+//
+// Embeddings deliberately do not follow OPENAI_BASE_URL. The vector column is
+// sized to the embedder's width at CREATE TABLE, so pointing chat at a local
+// model for cheap iteration must not silently move the embedder too — that
+// swaps a 1024-wide model for a 768-wide one and every stored vector has to be
+// rebuilt. Chat is the thing worth running locally; embeddings are ~$0.01 per
+// million tokens, so there is little to gain and a migration to lose.
+//
+// Set EMBEDDING_BASE_URL to move them anyway, on purpose.
+func EmbeddingBaseURL() string {
+	return EnvOr("EMBEDDING_BASE_URL", openRouterBaseURL)
+}
+
+// EmbeddingSelfHosted reports whether embeddings go somewhere other than
+// OpenRouter.
+func EmbeddingSelfHosted() bool {
+	return EmbeddingBaseURL() != openRouterBaseURL
+}
+
 // EnvBool reports whether an environment variable is set to a truthy value.
 // Anything unparseable is false, so a typo fails safe rather than silently
 // enabling something.
@@ -72,6 +86,7 @@ func EnvBool(key string) bool {
 	return err == nil && v
 }
 
+// EnvOr returns the environment variable named by key, or fallback if unset.
 func EnvOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -89,17 +104,16 @@ func firstEnv(keys ...string) string {
 	return ""
 }
 
-// apiKey resolves the credential for the active provider.
+// apiKeyFor resolves the credential for one endpoint.
 //
-// Self-hosted servers usually ignore the key but the OpenAI protocol still
-// requires the header, so a placeholder is substituted rather than failing —
-// otherwise every local setup would need a meaningless secret in .env.
-func apiKey() (string, error) {
-	if SelfHosted() {
-		// OPENROUTER_API_KEY is deliberately not consulted here. It is a live
-		// billable credential, and a .env that still carries one is the normal
-		// case when switching to a local endpoint — forwarding it to an
-		// arbitrary process on localhost would leak it silently.
+// OPENROUTER_API_KEY is only ever sent to OpenRouter. A .env that still carries
+// one is the normal case when chat is pointed at localhost, and forwarding a
+// live billable credential to an arbitrary local process would leak it
+// silently. Self-hosted servers usually ignore the key but the OpenAI protocol
+// still requires the header, so a placeholder is substituted rather than
+// failing — otherwise every local setup would need a meaningless secret.
+func apiKeyFor(baseURL string) (string, error) {
+	if baseURL != openRouterBaseURL {
 		if key := firstEnv("OPENAI_API_KEY", "LLM_API_KEY"); key != "" {
 			return key, nil
 		}
@@ -112,50 +126,58 @@ func apiKey() (string, error) {
 	return "", errNoAPIKey
 }
 
-// ChatModel returns the chat model name for the active provider.
+// ChatModel returns the chat model name.
+//
+// One variable names the model wherever it runs: OPENROUTER_MODEL is passed
+// through unchanged to a self-hosted server. Servers that serve a single loaded
+// model ignore the field, and ones that route by name need whatever name you
+// gave them — neither case is helped by a second variable.
 func ChatModel() string {
+	if model := os.Getenv("OPENROUTER_MODEL"); model != "" {
+		return model
+	}
+
 	if SelfHosted() {
-		if model := firstEnv("LLM_MODEL", "OPENAI_MODEL"); model != "" {
-			return model
-		}
-		warn("chat-model", "OPENAI_BASE_URL is set but no chat model is configured; sending %q. Set LLM_MODEL if your server routes by model name.", placeholderModel)
+		warn("chat-model", "OPENAI_BASE_URL is set but OPENROUTER_MODEL is empty; sending %q. Set OPENROUTER_MODEL if your server routes by model name.", placeholderModel)
 		return placeholderModel
 	}
 
-	return EnvOr("OPENROUTER_MODEL", EnvOr("LLM_MODEL", defaultChatModel))
+	return defaultChatModel
 }
 
-// EmbeddingModel returns the embedding model name for the active provider.
+// EmbeddingModel returns the embedding model name.
 func EmbeddingModel() string {
-	if SelfHosted() {
-		if model := firstEnv("LLM_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"); model != "" {
-			return model
-		}
-		warn("embedding-model", "OPENAI_BASE_URL is set but no embedding model is configured; sending %q. Set LLM_EMBEDDING_MODEL if your server routes by model name.", placeholderModel)
+	if model := os.Getenv("OPENROUTER_EMBEDDING_MODEL"); model != "" {
+		return model
+	}
+
+	if EmbeddingSelfHosted() {
+		warn("embedding-model", "EMBEDDING_BASE_URL is set but OPENROUTER_EMBEDDING_MODEL is empty; sending %q. Set OPENROUTER_EMBEDDING_MODEL if your server routes by model name.", placeholderModel)
 		return placeholderModel
 	}
 
-	return EnvOr("OPENROUTER_EMBEDDING_MODEL", EnvOr("LLM_EMBEDDING_MODEL", defaultEmbeddingModel))
+	return defaultEmbeddingModel
 }
 
-// newOpenAICompatibleClient builds a client against the configured endpoint.
-// Chat and embeddings use different models, so each caller gets its own client
-// rather than sharing one instance carrying both.
-func newOpenAICompatibleClient(opts ...openai.Option) (*openai.LLM, error) {
-	key, err := apiKey()
+// newOpenAICompatibleClient builds a client against one endpoint. Chat and
+// embeddings can now resolve to different endpoints, so the URL is a parameter
+// rather than read from the environment here.
+func newOpenAICompatibleClient(baseURL string, opts ...openai.Option) (*openai.LLM, error) {
+	key, err := apiKeyFor(baseURL)
 	if err != nil {
 		return nil, err
 	}
 
 	return openai.New(append([]openai.Option{
 		openai.WithToken(key),
-		openai.WithBaseURL(BaseURL()),
+		openai.WithBaseURL(baseURL),
 	}, opts...)...)
 }
 
 // GetLLM initializes and returns the chat model backing the agent.
 func GetLLM() (llms.Model, error) {
 	return newOpenAICompatibleClient(
+		BaseURL(),
 		openai.WithModel(ChatModel()),
 	)
 }
@@ -164,26 +186,21 @@ func GetLLM() (llms.Model, error) {
 //
 // Zero is meaningful, not an error: langchaingo omits the `dimensions` request
 // field when it is zero, and self-hosted embedding servers generally reject
-// that field outright. That is also why zero is the default when a self-hosted
-// endpoint is configured — sending the field is the likelier way to break.
+// that field outright. That is why zero is the default when EMBEDDING_BASE_URL
+// points somewhere else — sending the field is the likelier way to break.
 // VectorDimensions then supplies the column width.
 func EmbeddingDimensions() int {
-	raw := firstEnv("OPENROUTER_EMBEDDING_DIMENSIONS", "LLM_EMBEDDING_DIMENSIONS")
-	if SelfHosted() {
-		// The OpenRouter-named variable describes the OpenRouter provider, so
-		// it must not decide what a local server receives.
-		raw = firstEnv("LLM_EMBEDDING_DIMENSIONS", "OPENAI_EMBEDDING_DIMENSIONS")
-		if raw == "" {
+	raw := os.Getenv("OPENROUTER_EMBEDDING_DIMENSIONS")
+	if raw == "" {
+		if EmbeddingSelfHosted() {
 			return 0
 		}
-	}
-	if raw == "" {
 		return DefaultEmbeddingDimensions
 	}
 
 	dims, err := strconv.Atoi(raw)
 	if err != nil || dims < 0 {
-		log.Printf("WARNING: ignoring invalid embedding dimensions %q", raw)
+		log.Printf("WARNING: ignoring invalid OPENROUTER_EMBEDDING_DIMENSIONS %q", raw)
 		return DefaultEmbeddingDimensions
 	}
 	return dims
@@ -216,8 +233,11 @@ func VectorDimensions() int {
 // GetEmbedder initializes and returns the Embedder used by the vector store.
 func GetEmbedder() (embeddings.Embedder, error) {
 	client, err := newOpenAICompatibleClient(
+		EmbeddingBaseURL(),
 		// Irrelevant to embedding calls, but openai.New requires a chat model.
-		openai.WithModel(ChatModel()),
+		// The embedding model is used so a self-hosted chat placeholder cannot
+		// leak into a client that only ever talks to the embedding endpoint.
+		openai.WithModel(EmbeddingModel()),
 		openai.WithEmbeddingModel(EmbeddingModel()),
 		// Zero is passed through deliberately: langchaingo drops the field.
 		openai.WithEmbeddingDimensions(EmbeddingDimensions()),
@@ -229,19 +249,21 @@ func GetEmbedder() (embeddings.Embedder, error) {
 	return embeddings.NewEmbedder(client)
 }
 
-// DescribeLLM returns a one-line summary of the resolved provider for the boot
-// log. It never includes the key.
+// DescribeLLM returns a one-line summary of the resolved providers for the boot
+// log. Chat and embeddings are reported separately because they can now point
+// at different endpoints. It never includes a key.
 func DescribeLLM() string {
-	provider := "OpenRouter"
-	if SelfHosted() {
-		provider = "self-hosted"
-	}
-
-	return provider + " at " + BaseURL() +
-		" | chat: " + ChatModel() +
-		" | embeddings: " + EmbeddingModel() +
+	return "chat: " + ChatModel() + " via " + providerName(SelfHosted()) + " at " + BaseURL() +
+		" | embeddings: " + EmbeddingModel() + " via " + providerName(EmbeddingSelfHosted()) + " at " + EmbeddingBaseURL() +
 		" (request " + describeDims(EmbeddingDimensions()) +
 		", column " + strconv.Itoa(VectorDimensions()) + ")"
+}
+
+func providerName(selfHosted bool) string {
+	if selfHosted {
+		return "self-hosted"
+	}
+	return "OpenRouter"
 }
 
 func describeDims(dims int) string {
