@@ -67,8 +67,16 @@ Deployed on **AWS App Runner** from an image in **Amazon ECR**.
 | `GET /tools` | The MCP tools discovered at boot, with their JSON Schemas. Proof the MCP handshake is live. |
 | `POST /agent` | `{"question": "…", "limit": 4}` — the full loop: recall, query the cluster, decide. Returns the answer **and the trace of every tool call**. |
 
-`/store`, `/retrieve` and `/ask` never depend on MCP. If the MCP handshake fails at boot the
-service still starts, logs why, and `/tools` and `/agent` return `503` with an actionable message.
+**`COCKROACH_API_KEY` is required to start.** MCP is one of the two CockroachDB integrations this
+service exists to demonstrate, so booting without it would serve an API that answers `/ping`
+happily while `/agent` can only ever return `503` — a problem found by whoever calls the route
+first rather than by whoever started the process. Missing it is fatal, with a message naming what
+to set.
+
+Being *configured but unreachable* is treated differently, because that is the endpoint being down
+rather than the operator forgetting something: `/store`, `/retrieve` and `/ask` never depend on
+MCP, so the service still starts, logs why, and `/tools` and `/agent` return `503` with an
+actionable message.
 A session that drops *mid-run* is the same class of failure, so it gets the same `503` rather than a
 generic `500` — with the partial trace attached, since that is the evidence of how far the
 investigation got before the cluster went away.
@@ -175,6 +183,10 @@ at initdb time. Point `DATABASE_URL` at
 to CockroachDB; it cannot be pointed at PostgreSQL. So `/tools` and `/agent` return 503 and you
 lose exactly the half of the system that is hardest to iterate on. Use this only as a portability
 check on the vector store.
+
+`COCKROACH_API_KEY` still has to be set to something, since an empty one is fatal at boot. Any
+non-empty value works here: the connection then fails, which is the non-fatal path, and the service
+starts with MCP unavailable — which is the state this check wants anyway.
 
 ### Pointing at your own LLM
 
