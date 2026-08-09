@@ -2,7 +2,10 @@
 /services/*/bin/
 /services/*/coverage.out
 /services/*/coverage.html
+/services/*/.env
 
 # Editor and OS noise
 .DS_Store
 *.swp
+
+.env

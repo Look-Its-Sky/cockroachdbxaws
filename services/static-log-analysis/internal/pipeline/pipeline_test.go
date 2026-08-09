@@ -142,6 +142,22 @@ func TestOTLPPaymentErrorsAreRedactedBeforeDurableAcknowledgementAndDeduplicated
 	}
 }
 
+func TestMissingProducerUIDIsAcceptedAndMeasured(t *testing.T) {
+	clock := fakeclock.NewAtOrigin()
+	policy := redact.MinimalPolicy()
+	service := newService(t, clock, policy, openJournal(t, clock, policy), &capturingStore{})
+	producer := otlpgen.New(otlpgen.WithClock(clock), otlpgen.WithIDs(testids.New(testids.WithClock(clock))))
+	payload := marshalRequest(t, producer.Request(producer.Record(otlpgen.WithoutRecordUID())))
+
+	result, err := service.Ingest(context.Background(), envelope(clock.Now()), payload, admission.EncodingIdentity)
+	if err != nil || !result.Acknowledged || result.Accepted != 1 {
+		t.Fatalf("derived record was not accepted: result=%+v err=%v", result, err)
+	}
+	if got := service.Counters().DerivedIdentity; got != 1 {
+		t.Fatalf("derived identity counter=%d, want 1", got)
+	}
+}
+
 // A database failure must leave every claim exactly where it was and re-prepare
 // the identical transactional candidates on the retry. Whether any candidate is
 // elected is the Store's decision, which this test does not simulate.
@@ -251,9 +267,40 @@ func TestPartialClaimRejectionStillDurablyAcknowledgesSafeSibling(t *testing.T) 
 	if result.Rejected[0].Index != 1 || result.Rejected[0].Reason != pipeline.RejectionClaimNotPermitted {
 		t.Fatalf("unexpected rejection: %+v", result.Rejected)
 	}
+	if got := service.Counters().RecordRejections.ClaimNotPermitted; got != 1 {
+		t.Fatalf("claim rejection counter=%d, want 1", got)
+	}
 	stats, err := j.Stats()
 	if err != nil || stats.Pending != 1 {
 		t.Fatalf("safe sibling was not durable: stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestRecordLocalRejectionsAreCountedByClosedSafeCategory(t *testing.T) {
+	clock := fakeclock.NewAtOrigin()
+	policy := redact.MinimalPolicy()
+	service := newService(t, clock, policy, openJournal(t, clock, policy), &capturingStore{})
+	producer := otlpgen.New(otlpgen.WithClock(clock), otlpgen.WithIDs(testids.New(testids.WithClock(clock))))
+	missingTimes := producer.Record(otlpgen.WithoutTimestamps())
+	missingContent := producer.Record(otlpgen.WithoutBody(), otlpgen.WithEventName(""))
+
+	result, err := service.Ingest(context.Background(), envelope(clock.Now()),
+		marshalRequest(t, producer.Request(missingTimes, missingContent)), admission.EncodingIdentity)
+	if err != nil || !result.Acknowledged || result.Accepted != 0 || len(result.Rejected) != 2 {
+		t.Fatalf("unexpected rejection result=%+v err=%v", result, err)
+	}
+	if result.Rejected[0].Reason != pipeline.RejectionInvalidRecord ||
+		result.Rejected[0].Subreason != pipeline.RejectionInvalidMissingTimestamps {
+		t.Fatalf("want safe missing-timestamps subreason, got %+v", result.Rejected[0])
+	}
+	if result.Rejected[1].Reason != pipeline.RejectionInvalidRecord ||
+		result.Rejected[1].Subreason != pipeline.RejectionInvalidMissingContent {
+		t.Fatalf("want safe missing-content subreason, got %+v", result.Rejected[1])
+	}
+
+	counters := service.Counters().RecordRejections
+	if counters.InvalidMissingTimestamps != 1 || counters.InvalidMissingContent != 1 || counters.Total() != 2 {
+		t.Fatalf("each rejection must increment exactly one counter, got %+v", counters)
 	}
 }
 

@@ -689,7 +689,7 @@ func (p *Policy) ValidateRecord(record model.NormalizedLog) error {
 		record.SchemaVersion, record.RecordID, record.RecordIDVersion, string(record.IdentityQuality), record.BatchID,
 		string(record.Source.SourceType), record.Source.SourceAccount, record.Source.Region,
 		record.Source.SourceInstance, record.Source.CredentialIdentity, record.Region,
-		record.TimestampInferenceReason, record.SeverityText, record.EventName,
+		record.TimestampInferenceReason, record.ObservedTimeInferenceReason, record.SeverityText, record.EventName,
 		record.Service.Name, record.Service.Namespace, record.Service.InstanceID, record.Service.Environment,
 		record.Deployment.ID, record.Deployment.Version, record.Correlation.TraceID, record.Correlation.SpanID,
 		record.Redaction.PolicyVersion,

@@ -15,6 +15,7 @@ type NormalizedLog struct {
     EventTime         time.Time
     ObservedTime      time.Time
     TimestampInferred bool
+    ObservedTimeInferred bool
     SeverityNumber    int32
     SeverityText      string
     SeverityClass     string
@@ -52,6 +53,11 @@ a useful fingerprint.
 ## Missing data policy
 
 - Missing event time uses observed time and is marked inferred.
+- Missing observed time uses event time and is marked with separate observed-time
+  inference provenance. This deterministic fallback keeps upstream replays on
+  the same `derived:v1` identity.
+- A record missing both event and observed time is rejected locally; there is no
+  stable time from which to infer either value.
 - Missing severity becomes `UNSPECIFIED`; the normalizer does not guess.
 - A source-specific default environment is allowed only for a source dedicated
   to one environment.

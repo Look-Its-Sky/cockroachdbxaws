@@ -147,6 +147,20 @@ func TestValidateReportsStructuralViolations(t *testing.T) {
 			because: "a reason without inference means the two fields disagree",
 		},
 		{
+			name:    "inferred observed time without a reason",
+			mutate:  func(r *model.NormalizedLog) { r.ObservedTimeInferred = true },
+			field:   "observed_time_inference_reason",
+			because: "an inferred observed timestamp must retain its provenance",
+		},
+		{
+			name: "observed-time reason without inference",
+			mutate: func(r *model.NormalizedLog) {
+				r.ObservedTimeInferenceReason = "observed_time_missing_event_time_used"
+			},
+			field:   "observed_time_inference_reason",
+			because: "a reason without inference means the two fields disagree",
+		},
+		{
 			name:    "unknown severity class",
 			mutate:  func(r *model.NormalizedLog) { r.SeverityClass = "critical" },
 			field:   "severity_class",

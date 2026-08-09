@@ -49,6 +49,8 @@ message NormalizedLog {
   NormalizedException exception = 23;
   RedactionMetadata redaction = 24;
   RegionalLogReference raw_reference = 25;
+  bool observed_time_inferred = 26;
+  string observed_time_inference_reason = 27;
 }
 
 message TrustedEnvelope {

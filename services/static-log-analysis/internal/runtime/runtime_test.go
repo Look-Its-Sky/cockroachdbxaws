@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,7 @@ func serverArgs(t *testing.T, role string, overrides ...string) []string {
 		"-region=" + otlpgen.DefaultRegion, "-tenant-id=tenant-a", "-classification=SENSITIVE",
 		"-journal-dir=" + filepath.Join(t.TempDir(), "journal"), "-journal-max-bytes=67108864",
 		"-otlp-grpc-listen=127.0.0.1:0", "-otlp-http-listen=127.0.0.1:0",
+		"-admin-listen=127.0.0.1:0",
 		"-otlp-trust-source=static_local", "-otlp-source-account=aws-account-a",
 		"-otlp-source-instance=collector-a", "-otlp-credential-identity=workload-a",
 		"-otlp-allowed-environments=" + otlpgen.DefaultEnvironment, "-otlp-allowed-services=" + otlpgen.DefaultService,
@@ -111,6 +113,7 @@ func outboxArgs(t *testing.T) []string {
 		"-outbox-dead-letter-queue-url=http://127.0.0.1:4566/000000000000/agent-assignments-dlq",
 		"-outbox-interval=10ms", "-outbox-idle-interval=10ms",
 		"-outbox-backoff-min=10ms", "-outbox-backoff-max=20ms",
+		"-admin-listen=127.0.0.1:0",
 	}
 }
 
@@ -260,6 +263,27 @@ func TestOutboxRoleStartsAPublisherThatDrainsCommittedAssignments(t *testing.T) 
 	waitFor(t, "the committed assignment to be published", func() bool { return len(transport.Delivered()) == 1 })
 	if marks := store.markedPublished(); len(marks) != 1 {
 		t.Fatalf("%d published messages were recorded", len(marks))
+	}
+}
+
+func TestAListenerStartupFailureDoesNotStartABackgroundWorker(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	source := testids.New()
+	transport := newFakeTransport(otlpgen.DefaultRegion)
+	store := &stubOutboxStore{claimable: []persistence.OutboxClaim{outboxClaim(t, source)}}
+	args := append(outboxArgs(t), "-admin-listen="+listener.Addr().String())
+	if server, err := runtime.Start(context.Background(), mustParse(t, args), outboxDeps(t, store, transport)); err == nil {
+		_ = server.Shutdown(context.Background())
+		t.Fatal("startup succeeded while its admin address was occupied")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if delivered := transport.Delivered(); len(delivered) != 0 {
+		t.Fatalf("a worker ran after startup failed and delivered %d messages", len(delivered))
 	}
 }
 
@@ -907,6 +931,9 @@ func TestTheAdminSurfaceAnswersHealthReadinessAndMetrics(t *testing.T) {
 				"static_log_analysis_journal_pending_records",
 				"static_log_analysis_shed_total",
 				"static_log_analysis_backpressured_total",
+				"static_log_analysis_derived_identity_total",
+				"static_log_analysis_rejected_invalid_missing_timestamps_total",
+				"static_log_analysis_rejected_invalid_structural_total",
 			} {
 				if !strings.Contains(body, required) {
 					t.Fatalf("metrics do not export %s:\n%s", required, body)

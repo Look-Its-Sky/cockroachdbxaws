@@ -177,3 +177,15 @@ func TestTheExporterCompressesTheWayTheReceiverExpects(t *testing.T) {
 		t.Fatalf("compression=%q, want gzip", got)
 	}
 }
+
+func TestCollectorDoesNotInventIdentityAfterAnUpstreamRetryBoundary(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Clean(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"UUIDv7()", "log.record.uid"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("Collector configuration contains %q; a fresh UID here would split an upstream retry into another record", forbidden)
+		}
+	}
+}

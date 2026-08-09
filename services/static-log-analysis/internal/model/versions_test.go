@@ -15,7 +15,8 @@ func TestParseSchemaVersion(t *testing.T) {
 		want  model.SchemaVersion
 		valid bool
 	}{
-		{name: "current", text: "1.0", want: model.SchemaVersion{Major: 1, Minor: 0}, valid: true},
+		{name: "previous minor", text: "1.0", want: model.SchemaVersion{Major: 1, Minor: 0}, valid: true},
+		{name: "current", text: "1.1", want: model.SchemaVersion{Major: 1, Minor: 1}, valid: true},
 		{name: "later minor", text: "1.7", want: model.SchemaVersion{Major: 1, Minor: 7}, valid: true},
 		{name: "two digit minor", text: "1.10", want: model.SchemaVersion{Major: 1, Minor: 10}, valid: true},
 		{name: "later major", text: "2.0", want: model.SchemaVersion{Major: 2, Minor: 0}, valid: true},
@@ -91,7 +92,8 @@ func TestRecordAcceptsCompatibleSchemaVersionsAndRejectsOthers(t *testing.T) {
 		accepted bool
 		because  string
 	}{
-		{version: "1.0", accepted: true, because: "it is the version this build writes"},
+		{version: "1.0", accepted: true, because: "an older minor remains readable"},
+		{version: "1.1", accepted: true, because: "it is the version this build writes"},
 		{version: "1.7", accepted: true,
 			because: "a newer minor only adds fields, which a reader ignores"},
 		{version: "2.0", accepted: false,

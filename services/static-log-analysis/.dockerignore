@@ -1,0 +1,12 @@
+.git
+.github
+.local
+.env
+.env.*
+!.env.example
+bin
+coverage.out
+coverage.html
+**/*_test.go
+docs
+deploy/*.md

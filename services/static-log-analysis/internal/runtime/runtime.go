@@ -228,7 +228,6 @@ func Start(ctx context.Context, config Config, deps Deps) (*Server, error) {
 	}
 	if config.Role.Processes() {
 		server.worker = newWorker(service, config.Worker, deps.Clock, deps.Logger)
-		server.worker.start()
 	}
 	if config.Role.Polls() {
 		source, closeSource, err := deps.OpenSource(ctx, config, policy, deps, service)
@@ -238,12 +237,18 @@ func Start(ctx context.Context, config Config, deps Deps) (*Server, error) {
 		}
 		server.closeSource = closeSource
 		server.worker = newPollWorker(source, config.Source.Cadence, deps.Clock, deps.Logger)
-		server.worker.start()
 	}
 	server.service = service
 	if err := server.startAdmin(config); err != nil {
 		server.closeBoundaries()
 		return nil, err
+	}
+	// Bind every listener before starting a background cycle. If the admin
+	// address is invalid or occupied, startup cleanup may close the journal,
+	// checkpoint store, transport, and database immediately; no worker may be
+	// racing those closes.
+	if server.worker != nil {
+		server.worker.start()
 	}
 	deps.Logger.Info("static-log-analysis started", slog.String("config", config.Describe()),
 		slog.String("otlp_grpc_addr", server.GRPCAddr()), slog.String("otlp_http_addr", server.HTTPAddr()))
@@ -282,13 +287,13 @@ func startPublisher(ctx context.Context, config Config, deps Deps) (*Server, err
 	}
 	server.worker = newPublishWorker(&faultingPublisher{publisher: publisher, failed: server.failed},
 		config.Outbox.Cadence, deps.Clock, deps.Logger)
-	server.worker.start()
 	// An outbox replica runs no coordinator, so its metrics are the publisher's
 	// and its readiness is simply that it started.
 	if err := server.startAdmin(config); err != nil {
 		server.closeBoundaries()
 		return nil, err
 	}
+	server.worker.start()
 	deps.Logger.Info("static-log-analysis started", slog.String("config", config.Describe()))
 	return server, nil
 }
@@ -526,6 +531,7 @@ func (s *Server) metrics() []metric {
 	var exported []metric
 	if s.service != nil {
 		counters := s.service.Counters()
+		rejected := counters.RecordRejections
 		exported = append(exported,
 			metric{"static_log_analysis_recovery_skipped_total", "Retained records the rule engine could not observe during startup replay.", counters.RecoverySkipped},
 			metric{"static_log_analysis_scope_rejections_total", "Envelopes addressed to another region.", counters.ScopeRejections},
@@ -533,6 +539,16 @@ func (s *Server) metrics() []metric {
 			metric{"static_log_analysis_quarantined_total", "Records given a terminal categorical outcome.", counters.Quarantined},
 			metric{"static_log_analysis_shed_total", "Optional records deliberately dropped near capacity.", counters.Shed},
 			metric{"static_log_analysis_backpressured_total", "Batches refused because mandatory data could not be persisted.", counters.Backpressured},
+			metric{"static_log_analysis_derived_identity_total", "OTLP records normalized with the deterministic identity fallback.", counters.DerivedIdentity},
+			metric{"static_log_analysis_rejected_nesting_too_deep_total", "Records rejected because their OTLP value nesting exceeded the admission bound.", rejected.NestingTooDeep},
+			metric{"static_log_analysis_rejected_claim_not_permitted_total", "Records rejected because an untrusted identity claim exceeded the authenticated envelope.", rejected.ClaimNotPermitted},
+			metric{"static_log_analysis_rejected_unusable_identity_total", "Records rejected because no valid replay-stable identity could be established.", rejected.UnusableIdentity},
+			metric{"static_log_analysis_rejected_normalized_record_too_large_total", "Records rejected because their safe normalized form exceeded the size bound.", rejected.RecordTooLarge},
+			metric{"static_log_analysis_rejected_invalid_missing_timestamps_total", "Records rejected because both event and observed timestamps were absent.", rejected.InvalidMissingTimestamps},
+			metric{"static_log_analysis_rejected_invalid_missing_content_total", "Records rejected because both body and event name were absent.", rejected.InvalidMissingContent},
+			metric{"static_log_analysis_rejected_invalid_prohibited_content_total", "Records rejected by final prohibited-content validation.", rejected.InvalidProhibitedContent},
+			metric{"static_log_analysis_rejected_invalid_structural_total", "Records rejected because their normalized structure was invalid.", rejected.InvalidStructural},
+			metric{"static_log_analysis_rejected_invalid_other_total", "Records rejected for a closed fallback invalid-record category.", rejected.InvalidOther},
 		)
 	}
 	if s.journal != nil {

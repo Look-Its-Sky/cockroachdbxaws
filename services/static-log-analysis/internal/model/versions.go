@@ -20,7 +20,7 @@ var ErrInvalidSchemaVersion = errors.New("model: invalid schema version")
 const NormalizedLogSchemaMajor = 1
 
 // NormalizedLogSchemaMinor is the minor version this build writes.
-const NormalizedLogSchemaMinor = 0
+const NormalizedLogSchemaMinor = 1
 
 // SchemaVersion is a parsed major.minor version.
 type SchemaVersion struct {

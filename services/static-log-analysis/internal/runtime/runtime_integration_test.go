@@ -41,6 +41,7 @@ func ingressArgs(role, dir string) []string {
 		"-journal-dir=" + dir, "-journal-max-bytes=67108864",
 		"-redaction-forbidden-values=" + forbiddenValue,
 		"-otlp-grpc-listen=127.0.0.1:0", "-otlp-http-listen=127.0.0.1:0",
+		"-admin-listen=127.0.0.1:0",
 		"-otlp-trust-source=static_local", "-otlp-source-account=aws-account-a",
 		"-otlp-source-instance=collector-a", "-otlp-credential-identity=workload-a",
 		"-otlp-allowed-environments=" + otlpgen.DefaultEnvironment, "-otlp-allowed-services=" + otlpgen.DefaultService,

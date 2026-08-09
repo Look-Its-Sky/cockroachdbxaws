@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/identity"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/model"
@@ -157,6 +158,85 @@ func TestInvalidProducerUIDErrorIsCategorizedWithoutEchoingTheUID(t *testing.T) 
 	}
 	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("identity error echoed producer uid: %v", err)
+	}
+}
+
+func TestDerivedV1IsStableAcrossRetriesAndMapOrder(t *testing.T) {
+	record := derivedRecord()
+	first, err := identity.DerivedV1(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither transport-attempt state nor map iteration order belongs to a
+	// record's identity. Both can change when the same export is retried.
+	retried := record
+	retried.BatchID = "0194f0a0-0000-7000-8000-000000000099"
+	retried.Source.ReceivedAt = retried.Source.ReceivedAt.Add(time.Minute)
+	retried.Attributes = map[string]model.SafeValue{
+		"z": model.SafeInt(7),
+		"a": model.SafeString("stable"),
+	}
+	again, err := identity.DerivedV1(retried)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again {
+		t.Fatalf("a retry changed derived identity: %s != %s", first, again)
+	}
+	if len(first) != 64 || strings.ToLower(first) != first {
+		t.Fatalf("derived:v1 must produce 64 lowercase hex characters, got %q", first)
+	}
+	const documentedDigest = "7f54f9ab435ea4ad50896e73486049066bd832e43c4ad0c0e69957193a0fea7b"
+	if first != documentedDigest {
+		t.Fatalf("derived:v1 representative digest changed: got %s", first)
+	}
+}
+
+func TestDerivedV1IncludesStableIncidentEvidence(t *testing.T) {
+	base := derivedRecord()
+	want, err := identity.DerivedV1(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]func(*model.NormalizedLog){
+		"source instance": func(r *model.NormalizedLog) { r.Source.SourceInstance = "collector-b" },
+		"service":         func(r *model.NormalizedLog) { r.Service.Name = "cartservice" },
+		"event time":      func(r *model.NormalizedLog) { r.EventTime = r.EventTime.Add(time.Nanosecond) },
+		"severity":        func(r *model.NormalizedLog) { r.SeverityNumber++ },
+		"body":            func(r *model.NormalizedLog) { r.Body = model.SafeString("different") },
+		"attribute":       func(r *model.NormalizedLog) { r.Attributes["a"] = model.SafeString("different") },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := derivedRecord()
+			mutate(&changed)
+			got, err := identity.DerivedV1(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == want {
+				t.Fatalf("changing %s did not change derived identity", name)
+			}
+		})
+	}
+}
+
+func derivedRecord() model.NormalizedLog {
+	return model.NormalizedLog{
+		BatchID: "0194f0a0-0000-7000-8000-000000000001",
+		Source: model.TrustedEnvelope{
+			SourceType: model.SourceTypeOTLP, SourceAccount: "account-a", Region: "us-east-1",
+			AllowedEnvironments: []string{"production"}, AllowedServices: []string{"paymentservice"},
+			SourceInstance: "collector-a", CredentialIdentity: "spiffe://example/collector",
+			ReceivedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+		EventTime: time.Date(2026, 1, 2, 3, 4, 0, 1, time.UTC), ObservedTime: time.Date(2026, 1, 2, 3, 4, 0, 2, time.UTC),
+		SeverityNumber: 17, Body: model.SafeString("charge failed"),
+		Attributes:  map[string]model.SafeValue{"a": model.SafeString("stable"), "z": model.SafeInt(7)},
+		Service:     model.ServiceIdentity{Name: "paymentservice", Environment: "production"},
+		Correlation: model.CorrelationIdentity{TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef"},
 	}
 }
 

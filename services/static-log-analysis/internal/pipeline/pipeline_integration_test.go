@@ -52,7 +52,11 @@ func (j *failMarkOnceJournal) MarkCommittedBatch(claims []journal.CommitClaim) e
 func TestPaymentErrorVerticalSliceCreatesOneClaimableAssignmentAndContext(t *testing.T) {
 	ctx := context.Background()
 	store, pool := realStore(t)
-	clock := fakeclock.NewAtOrigin()
+	// Production time.Now values almost always carry sub-microsecond precision,
+	// while CockroachDB TIMESTAMPTZ round-trips at microsecond precision. Keep
+	// that remainder here so the outbox claim proves the assignment timestamp
+	// survives the real database boundary.
+	clock := fakeclock.New(fakeclock.Origin.Add(768 * time.Nanosecond))
 	policy, err := redact.MinimalPolicy().WithForbiddenValues("customer-secret")
 	if err != nil {
 		t.Fatal(err)

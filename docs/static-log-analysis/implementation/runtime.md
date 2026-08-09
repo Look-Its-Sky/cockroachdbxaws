@@ -2,8 +2,8 @@
 
 ## Artifact and roles
 
-There is one executable, `log-analysis`, and the role is its first positional
-argument:
+There is one long-running executable, `log-analysis`, and the role is its first
+positional argument:
 
 ```text
 log-analysis all
@@ -29,6 +29,13 @@ configuration it does not use. Its contract is cloudwatch-source.md.
 
 A `source` replica holds no database credential, for the same reason `ingest`
 does not.
+
+The container image also carries the one-shot `log-analysis-migrate` deployment
+utility. It is not a service role: an init job runs it before application
+replicas. It accepts no positional arguments, reads
+`STATIC_LOG_ANALYSIS_DATABASE_DSN`, and calls the reviewed embedded migration
+engine, including migration checksums and live-catalog verification. Its output
+is categorical and never includes the DSN.
 
 The `ingest` role holds no database credential. security.md requires
 least-privilege identities per role, and operations.md requires ingestion to

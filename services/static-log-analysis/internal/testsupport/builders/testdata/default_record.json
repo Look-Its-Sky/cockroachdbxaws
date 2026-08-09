@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "record_id": "6e0be036fe03c475ec21e84346f2285e96e4f19ccfc48512d5b9f6b0528fd32a",
   "record_id_version": "otlp:v1",
   "identity_quality": "native",
@@ -22,6 +22,7 @@
   "event_time": "2025-12-31T23:59:58Z",
   "observed_time": "2026-01-01T00:00:00Z",
   "timestamp_inferred": false,
+  "observed_time_inferred": false,
   "severity_number": 17,
   "severity_text": "ERROR",
   "severity_class": "error",

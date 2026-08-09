@@ -52,6 +52,7 @@ var (
 var errRecordPoison = errors.New("pipeline: record cannot be prepared")
 
 type RejectionReason string
+type RejectionSubreason string
 
 const (
 	RejectionNestingTooDeep    RejectionReason = "nesting_too_deep"
@@ -61,9 +62,18 @@ const (
 	RejectionRecordTooLarge    RejectionReason = "normalized_record_too_large"
 )
 
+const (
+	RejectionInvalidMissingTimestamps RejectionSubreason = "missing_timestamps"
+	RejectionInvalidMissingContent    RejectionSubreason = "missing_content"
+	RejectionInvalidProhibitedContent RejectionSubreason = "prohibited_content"
+	RejectionInvalidStructural        RejectionSubreason = "structural_validation"
+	RejectionInvalidOther             RejectionSubreason = "other"
+)
+
 type RecordRejection struct {
-	Index  int
-	Reason RejectionReason
+	Index     int
+	Reason    RejectionReason
+	Subreason RejectionSubreason
 }
 
 type IngestResult struct {
@@ -114,15 +124,48 @@ type Counters struct {
 	// Backpressured counts batches refused because mandatory data could not be
 	// persisted.
 	Backpressured uint64
+	// DerivedIdentity counts normalized OTLP records that used the deterministic
+	// fallback because the producer supplied no native record UID. It is an
+	// attempt counter: transport retries are intentionally visible.
+	DerivedIdentity  uint64
+	RecordRejections RecordRejectionCounters
+}
+
+type RecordRejectionCounters struct {
+	NestingTooDeep           uint64
+	ClaimNotPermitted        uint64
+	UnusableIdentity         uint64
+	RecordTooLarge           uint64
+	InvalidMissingTimestamps uint64
+	InvalidMissingContent    uint64
+	InvalidProhibitedContent uint64
+	InvalidStructural        uint64
+	InvalidOther             uint64
+}
+
+func (c RecordRejectionCounters) Total() uint64 {
+	return c.NestingTooDeep + c.ClaimNotPermitted + c.UnusableIdentity + c.RecordTooLarge +
+		c.InvalidMissingTimestamps + c.InvalidMissingContent + c.InvalidProhibitedContent +
+		c.InvalidStructural + c.InvalidOther
 }
 
 type counters struct {
-	recoverySkipped   atomic.Uint64
-	scopeRejections   atomic.Uint64
-	journalRejections atomic.Uint64
-	quarantined       atomic.Uint64
-	shed              atomic.Uint64
-	backpressured     atomic.Uint64
+	recoverySkipped                  atomic.Uint64
+	scopeRejections                  atomic.Uint64
+	journalRejections                atomic.Uint64
+	quarantined                      atomic.Uint64
+	shed                             atomic.Uint64
+	backpressured                    atomic.Uint64
+	derivedIdentity                  atomic.Uint64
+	rejectedNestingTooDeep           atomic.Uint64
+	rejectedClaimNotPermitted        atomic.Uint64
+	rejectedUnusableIdentity         atomic.Uint64
+	rejectedRecordTooLarge           atomic.Uint64
+	rejectedInvalidMissingTimestamps atomic.Uint64
+	rejectedInvalidMissingContent    atomic.Uint64
+	rejectedInvalidProhibitedContent atomic.Uint64
+	rejectedInvalidStructural        atomic.Uint64
+	rejectedInvalidOther             atomic.Uint64
 }
 
 type Store interface {
@@ -191,6 +234,18 @@ func (s *Service) Counters() Counters {
 		Quarantined:       s.counters.quarantined.Load(),
 		Shed:              s.counters.shed.Load(),
 		Backpressured:     s.counters.backpressured.Load(),
+		DerivedIdentity:   s.counters.derivedIdentity.Load(),
+		RecordRejections: RecordRejectionCounters{
+			NestingTooDeep:           s.counters.rejectedNestingTooDeep.Load(),
+			ClaimNotPermitted:        s.counters.rejectedClaimNotPermitted.Load(),
+			UnusableIdentity:         s.counters.rejectedUnusableIdentity.Load(),
+			RecordTooLarge:           s.counters.rejectedRecordTooLarge.Load(),
+			InvalidMissingTimestamps: s.counters.rejectedInvalidMissingTimestamps.Load(),
+			InvalidMissingContent:    s.counters.rejectedInvalidMissingContent.Load(),
+			InvalidProhibitedContent: s.counters.rejectedInvalidProhibitedContent.Load(),
+			InvalidStructural:        s.counters.rejectedInvalidStructural.Load(),
+			InvalidOther:             s.counters.rejectedInvalidOther.Load(),
+		},
 	}
 }
 
@@ -299,12 +354,18 @@ func (s *Service) Ingest(ctx context.Context, envelope model.TrustedEnvelope, pa
 	if err != nil {
 		return IngestResult{}, ErrRequestRejected
 	}
+	for _, record := range normalized.Records {
+		if record.IdentityQuality == model.IdentityQualityDerived {
+			s.counters.derivedIdentity.Add(1)
+		}
+	}
 	result := IngestResult{}
 	for _, rejected := range decoded.Rejected {
-		result.Rejected = append(result.Rejected, RecordRejection{Index: rejected.Index, Reason: RejectionNestingTooDeep})
+		result.Rejected = append(result.Rejected, s.recordRejection(rejected.Index, RejectionNestingTooDeep, ""))
 	}
 	for _, rejected := range normalized.Rejected {
-		result.Rejected = append(result.Rejected, RecordRejection{Index: rejected.Index, Reason: normalizationReason(rejected.Err)})
+		result.Rejected = append(result.Rejected, s.recordRejection(rejected.Index,
+			normalizationReason(rejected.Err), normalizationSubreason(rejected.Err)))
 	}
 	maximum := s.limits.MaxNormalizedBytes
 	if maximum == 0 {
@@ -314,7 +375,8 @@ func (s *Service) Ingest(ctx context.Context, envelope model.TrustedEnvelope, pa
 	capacity := s.capacity()
 	for i, record := range normalized.Records {
 		if journal.NormalizedRecordSize(record) > maximum {
-			result.Rejected = append(result.Rejected, RecordRejection{Index: normalized.RecordOriginalIndexes[i], Reason: RejectionRecordTooLarge})
+			result.Rejected = append(result.Rejected,
+				s.recordRejection(normalized.RecordOriginalIndexes[i], RejectionRecordTooLarge, ""))
 			continue
 		}
 		switch s.capacityAction(record, capacity) {
@@ -406,7 +468,7 @@ func (s *Service) IngestRecords(ctx context.Context, envelope model.TrustedEnvel
 			// Record-local: no retry makes this record smaller, and failing the
 			// whole call would make the source replay a batch whose one bad
 			// record can never be accepted.
-			result.Rejected = append(result.Rejected, RecordRejection{Index: i, Reason: RejectionRecordTooLarge})
+			result.Rejected = append(result.Rejected, s.recordRejection(i, RejectionRecordTooLarge, ""))
 			continue
 		}
 		admissions = append(admissions, journal.Admission{Record: record, Priority: priority(record.SeverityClass)})
@@ -665,6 +727,13 @@ func (s *Service) persistClaims(ctx context.Context, inputs []persistence.Proces
 }
 
 func (s *Service) prepareInput(claim journal.ClaimedRecord, decision incident.PersistenceDecision, now time.Time) (persistence.ProcessInput, error) {
+	// CockroachDB TIMESTAMPTZ round-trips at microsecond precision. The same
+	// instant is also encoded into the immutable assignment payload and checked
+	// again when an outbox replica claims it, so canonicalize once before either
+	// representation is built. Without this, ordinary production time.Now
+	// values retain nanoseconds in JSON but lose them in the database, making a
+	// valid assignment look corrupt and permanently unclaimable.
+	now = now.UTC().Truncate(time.Microsecond)
 	record := claim.Record
 	fp, err := fingerprint.Error(record)
 	if err != nil {
@@ -731,6 +800,52 @@ func normalizationReason(err error) RejectionReason {
 	default:
 		return RejectionInvalidRecord
 	}
+}
+
+func normalizationSubreason(err error) RejectionSubreason {
+	switch {
+	case errors.Is(err, normalize.ErrMissingTimestamps):
+		return RejectionInvalidMissingTimestamps
+	case errors.Is(err, normalize.ErrMissingContent):
+		return RejectionInvalidMissingContent
+	case errors.Is(err, normalize.ErrProhibitedContent):
+		return RejectionInvalidProhibitedContent
+	case errors.Is(err, normalize.ErrStructuralRecord):
+		return RejectionInvalidStructural
+	default:
+		if normalizationReason(err) == RejectionInvalidRecord {
+			return RejectionInvalidOther
+		}
+		return ""
+	}
+}
+
+func (s *Service) recordRejection(index int, reason RejectionReason, subreason RejectionSubreason) RecordRejection {
+	switch reason {
+	case RejectionNestingTooDeep:
+		s.counters.rejectedNestingTooDeep.Add(1)
+	case RejectionClaimNotPermitted:
+		s.counters.rejectedClaimNotPermitted.Add(1)
+	case RejectionUnusableIdentity:
+		s.counters.rejectedUnusableIdentity.Add(1)
+	case RejectionRecordTooLarge:
+		s.counters.rejectedRecordTooLarge.Add(1)
+	case RejectionInvalidRecord:
+		switch subreason {
+		case RejectionInvalidMissingTimestamps:
+			s.counters.rejectedInvalidMissingTimestamps.Add(1)
+		case RejectionInvalidMissingContent:
+			s.counters.rejectedInvalidMissingContent.Add(1)
+		case RejectionInvalidProhibitedContent:
+			s.counters.rejectedInvalidProhibitedContent.Add(1)
+		case RejectionInvalidStructural:
+			s.counters.rejectedInvalidStructural.Add(1)
+		default:
+			s.counters.rejectedInvalidOther.Add(1)
+			subreason = RejectionInvalidOther
+		}
+	}
+	return RecordRejection{Index: index, Reason: reason, Subreason: subreason}
 }
 
 func priority(severity model.SeverityClass) journal.Priority {

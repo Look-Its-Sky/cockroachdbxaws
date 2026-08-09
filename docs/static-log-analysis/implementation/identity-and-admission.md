@@ -88,24 +88,43 @@ source from colliding accidentally or impersonating service identity.
 
 ### Fallback version 1
 
-Recorded as `derived:v1`. Legacy inputs lacking a trusted UID hash a
-length-delimited canonical encoding of:
+Recorded as `derived:v1`. An OTLP record with no `log.record.uid` hashes an
+already-redacted canonical encoding. A present but malformed UID is rejected;
+it never silently changes identity versions.
 
 ```text
-trusted source envelope
-service
-event timestamp
-observed timestamp
-trace ID
-span ID
-severity number
-safe body
-sorted selected stable attributes
+"derived:v1" raw version prefix
+D(source type), D(source account), D(region)
+SET(allowed environments), SET(allowed services)
+D(source instance), D(credential identity)
+D(service name), D(service namespace), D(service instance), D(environment)
+I64(event Unix nanoseconds), I64(observed Unix nanoseconds)
+I64(severity number)
+D(trace ID), D(span ID)
+VALUE(safe body), D(event name)
+MAP(safe record attributes)
+MAP(safe resource attributes)
+MAP(safe scope attributes)
+
+D(s)   = U64 byte length followed by UTF-8 bytes
+SET(s) = U64 unique-member count followed by D(member) in UTF-8 byte order
+MAP(m) = U64 member count followed by D(key), VALUE(value) in key byte order
+I64(i) = signed value represented as big-endian two's-complement 64 bits
 ```
 
-Map keys are UTF-8 byte-sorted; values use deterministic Protobuf encoding. The
-fallback is explicitly marked `identity_quality=derived`, measured, and alerted.
-It MUST NOT be the normal OTLP path.
+`VALUE` starts with `D(kind)`. Strings and withheld reasons use `D`; integers
+use `I64`; doubles use big-endian IEEE-754 bits; booleans use one byte; maps and
+slices recursively encode their count and children in map-key or slice order.
+
+Transport-attempt state (`batch_id` and envelope `received_at`), deployment
+enrichment, redaction metadata, raw references, and record identity fields are
+excluded because they may legitimately change across retry or late enrichment.
+The input must have a timestamp and body or event name, and all encoded values
+must pass `SafeValue` validation.
+
+The fallback is explicitly marked `identity_quality=derived` and counted by
+`static_log_analysis_derived_identity_total`. It MUST NOT be the normal path for
+a producer capable of assigning a native UID before its first export.
 
 ## Batch identity
 

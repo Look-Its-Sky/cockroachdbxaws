@@ -62,6 +62,11 @@ trusted source envelope, event and observed time, timestamp inference status,
 severity number/class, safe body or event name, service/environment status,
 redaction policy version, and region are required.
 
+Normalized-log schema `1.1` adds `observed_time_inferred` and
+`observed_time_inference_reason`. Schema `1.0` remains readable with those fields
+false and absent. The existing event-time inference fields retain their original
+meaning.
+
 Optional structures include deployment, exception, trace/span correlation,
 attributes, scope, and regional raw reference. Every optional enrichment field
 distinguishes `not_available`, `not_applicable`, `pending`, and `available` where

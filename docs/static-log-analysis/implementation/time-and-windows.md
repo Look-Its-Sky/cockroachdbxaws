@@ -6,6 +6,14 @@
 `observed_time`. Values outside this bound are retained as source metadata but
 processing uses `observed_time` and sets `timestamp_inferred=true` plus a reason.
 
+When OTLP supplies `event_time` but omits `observed_time`, normalization uses
+`event_time` as the deterministic observed-time fallback and sets
+`observed_time_inferred=true` with reason
+`observed_time_missing_event_time_used`. The fallback happens before
+`derived:v1` identity construction, so an upstream replay retains the same
+identity. A record missing both timestamps is permanently rejected with the safe
+`missing_timestamps` subreason.
+
 All times are UTC with nanosecond-capable storage. Rule duration arithmetic uses
 monotonic test clocks where possible and never local wall-clock timezone rules.
 

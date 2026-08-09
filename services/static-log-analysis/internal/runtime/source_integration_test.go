@@ -75,6 +75,7 @@ func TestTheSourceRoleReadsARealLogGroupIntoItsJournal(t *testing.T) {
 		"-cloudwatch-endpoint-url=" + localstacktest.Endpoint(t),
 		"-cloudwatch-interval=20ms", "-cloudwatch-idle-interval=20ms",
 		"-cloudwatch-backoff-min=20ms", "-cloudwatch-backoff-max=40ms",
+		"-admin-listen=127.0.0.1:0",
 	}
 	config, err := runtime.Parse(args, func(string) string { return "" }, io.Discard)
 	if err != nil {

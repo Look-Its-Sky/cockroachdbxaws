@@ -156,6 +156,11 @@ func (r NormalizedLog) Validate() error {
 	} else if strings.TrimSpace(r.TimestampInferenceReason) != "" {
 		c.add("timestamp_inference_reason", "must be empty when timestamp_inferred is false")
 	}
+	if r.ObservedTimeInferred {
+		c.requireText("observed_time_inference_reason", r.ObservedTimeInferenceReason)
+	} else if strings.TrimSpace(r.ObservedTimeInferenceReason) != "" {
+		c.add("observed_time_inference_reason", "must be empty when observed_time_inferred is false")
+	}
 
 	switch r.SeverityClass {
 	case SeverityClassUnspecified, SeverityClassTrace, SeverityClassDebug,

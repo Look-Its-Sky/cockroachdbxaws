@@ -67,6 +67,10 @@ var (
 	ErrInvalidConfiguration    = errors.New("normalization configuration is invalid")
 	ErrMaterializationTooLarge = errors.New("normalization projected materialization exceeds limit")
 	ErrUnsafeEnvelope          = errors.New("normalization trusted envelope contains prohibited content")
+	ErrMissingTimestamps       = errors.New("normalization record has neither event nor observed time")
+	ErrMissingContent          = errors.New("normalization record has neither body nor event name")
+	ErrProhibitedContent       = errors.New("normalization record failed prohibited-content validation")
+	ErrStructuralRecord        = errors.New("normalization produced a structurally invalid record")
 )
 
 // Rejection is one record that was not normalized. The rest of its batch is
@@ -343,11 +347,8 @@ func (n *Normalizer) record(
 		return model.NormalizedLog{}, err
 	}
 
-	uid, _ := stringAttribute(logRecord.GetAttributes(), attributeRecordUID)
-	recordID, err := identity.OTLPV1(envelope.SourceInstance, uid)
+	uid, hasUID, err := producerRecordUID(logRecord.GetAttributes())
 	if err != nil {
-		// The derived-identity fallback for producers without a usable UID is
-		// a separate identity version with its own behaviour.
 		return model.NormalizedLog{}, fmt.Errorf("%w: %w", ErrUnusableIdentity, err)
 	}
 
@@ -355,33 +356,35 @@ func (n *Normalizer) record(
 	// unredacted value is ever assigned into the record.
 	rules := newRuleSet()
 	withheld := newPathSet()
-	eventTime, inferred, inferenceReason := normalizeEventTime(
-		unixNano(logRecord.GetTimeUnixNano()),
-		unixNano(logRecord.GetObservedTimeUnixNano()),
-	)
+	sourceEventTime := unixNano(logRecord.GetTimeUnixNano())
+	sourceObservedTime := unixNano(logRecord.GetObservedTimeUnixNano())
+	observedTime, observedInferred, observedInferenceReason, err := normalizeObservedTime(sourceEventTime, sourceObservedTime)
+	if err != nil {
+		return model.NormalizedLog{}, err
+	}
+	eventTime, inferred, inferenceReason := normalizeEventTime(sourceEventTime, observedTime)
 	record := model.NormalizedLog{
-		SchemaVersion:            model.NormalizedLogSchemaVersion,
-		RecordID:                 recordID,
-		RecordIDVersion:          model.RecordIDVersionOTLPV1,
-		IdentityQuality:          model.IdentityQualityNative,
-		BatchID:                  batchID,
-		Source:                   cloneEnvelope(envelope),
-		Region:                   envelope.Region,
-		EventTime:                eventTime,
-		ObservedTime:             unixNano(logRecord.GetObservedTimeUnixNano()),
-		TimestampInferred:        inferred,
-		TimestampInferenceReason: inferenceReason,
-		SeverityNumber:           int32(logRecord.GetSeverityNumber()),
-		SeverityText:             n.text(logRecord.GetSeverityText(), "severity_text", rules, withheld),
-		SeverityClass:            severityClass(logRecord.GetSeverityNumber()),
-		EventName:                n.text(logRecord.GetEventName(), "event_name", rules, withheld),
-		Service:                  service,
-		Deployment:               n.deployment(service, envelope.Region),
-		Correlation:              correlation(logRecord),
-		Body:                     n.value(logRecord.GetBody(), "body", rules, withheld),
-		Attributes:               n.recordAttributes(logRecord.GetAttributes(), rules, withheld),
-		ResourceAttributes:       n.attributes(resourceAttributes, "resource_attributes", rules, withheld),
-		ScopeAttributes:          n.attributes(scopeLogs.GetScope().GetAttributes(), "scope_attributes", rules, withheld),
+		SchemaVersion:               model.NormalizedLogSchemaVersion,
+		BatchID:                     batchID,
+		Source:                      cloneEnvelope(envelope),
+		Region:                      envelope.Region,
+		EventTime:                   eventTime,
+		ObservedTime:                observedTime,
+		TimestampInferred:           inferred,
+		TimestampInferenceReason:    inferenceReason,
+		ObservedTimeInferred:        observedInferred,
+		ObservedTimeInferenceReason: observedInferenceReason,
+		SeverityNumber:              int32(logRecord.GetSeverityNumber()),
+		SeverityText:                n.text(logRecord.GetSeverityText(), "severity_text", rules, withheld),
+		SeverityClass:               severityClass(logRecord.GetSeverityNumber()),
+		EventName:                   n.text(logRecord.GetEventName(), "event_name", rules, withheld),
+		Service:                     service,
+		Deployment:                  n.deployment(service, envelope.Region),
+		Correlation:                 correlation(logRecord),
+		Body:                        n.value(logRecord.GetBody(), "body", rules, withheld),
+		Attributes:                  n.recordAttributes(logRecord.GetAttributes(), rules, withheld),
+		ResourceAttributes:          n.attributes(resourceAttributes, "resource_attributes", rules, withheld),
+		ScopeAttributes:             n.attributes(scopeLogs.GetScope().GetAttributes(), "scope_attributes", rules, withheld),
 	}
 	record.Exception = n.exception(logRecord.GetAttributes(), service.Name, rules, withheld)
 	record.Redaction = model.RedactionMetadata{
@@ -389,14 +392,49 @@ func (n *Normalizer) record(
 		RuleIDs:        rules.sorted(),
 		WithheldFields: withheld.sorted(),
 	}
+	if record.Body.IsZero() && strings.TrimSpace(record.EventName) == "" {
+		return model.NormalizedLog{}, ErrMissingContent
+	}
 	if err := n.policy.ValidateRecord(record); err != nil {
-		return model.NormalizedLog{}, fmt.Errorf("normalize: final prohibited-content validation failed: %w", err)
+		return model.NormalizedLog{}, fmt.Errorf("%w: %v", ErrProhibitedContent, err)
+	}
+	if hasUID {
+		record.RecordID, err = identity.OTLPV1(envelope.SourceInstance, uid)
+		record.RecordIDVersion = model.RecordIDVersionOTLPV1
+		record.IdentityQuality = model.IdentityQualityNative
+	} else {
+		record.RecordID, err = identity.DerivedV1(record)
+		record.RecordIDVersion = model.RecordIDVersionDerivedV1
+		record.IdentityQuality = model.IdentityQualityDerived
+	}
+	if err != nil {
+		return model.NormalizedLog{}, fmt.Errorf("%w: %w", ErrUnusableIdentity, err)
 	}
 
 	if err := record.Validate(); err != nil {
-		return model.NormalizedLog{}, fmt.Errorf("normalize: produced an invalid record: %w", err)
+		return model.NormalizedLog{}, fmt.Errorf("%w: %v", ErrStructuralRecord, err)
 	}
 	return record, nil
+}
+
+// producerRecordUID distinguishes a genuinely absent UID, which uses the
+// measured derived fallback, from a malformed UID claim. Falling back from a
+// malformed claim would hide a producer defect and could assign a second
+// identity to a record that previously used the native path. OTLP duplicate
+// attributes retain the existing first-value behaviour; all UID copies are
+// removed from evidence after that first value establishes identity.
+func producerRecordUID(attributes []*common.KeyValue) (string, bool, error) {
+	for _, attribute := range attributes {
+		if attribute.GetKey() != attributeRecordUID {
+			continue
+		}
+		value, ok := attribute.GetValue().GetValue().(*common.AnyValue_StringValue)
+		if !ok {
+			return "", false, identity.ErrInvalidRecordUID
+		}
+		return value.StringValue, true, nil
+	}
+	return "", false, nil
 }
 
 const (
@@ -423,6 +461,16 @@ func normalizeEventTime(event, observed time.Time) (time.Time, bool, string) {
 		return observed, true, "event_time_outside_valid_range"
 	}
 	return event, false, ""
+}
+
+func normalizeObservedTime(event, observed time.Time) (time.Time, bool, string, error) {
+	if !observed.IsZero() {
+		return observed, false, "", nil
+	}
+	if !event.IsZero() {
+		return event, true, "observed_time_missing_event_time_used", nil
+	}
+	return time.Time{}, false, "", ErrMissingTimestamps
 }
 
 // reconcileClaims checks what a record says about itself against what its

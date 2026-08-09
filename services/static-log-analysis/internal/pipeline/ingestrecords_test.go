@@ -134,6 +134,9 @@ func TestIngestRecordsRejectsAnOversizedRecordWithoutLosingItsSiblings(t *testin
 	if result.Rejected[0].Index != 1 || result.Rejected[0].Reason != pipeline.RejectionRecordTooLarge {
 		t.Fatalf("rejection=%+v, want index 1 rejected as too large", result.Rejected[0])
 	}
+	if got := service.Counters().RecordRejections.RecordTooLarge; got != 1 {
+		t.Fatalf("record-too-large counter=%d, want 1", got)
+	}
 }
 
 // TestIngestRecordsAcknowledgesAnAllRejectedBatchWithoutWriting pins the same

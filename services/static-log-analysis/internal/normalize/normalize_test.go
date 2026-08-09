@@ -225,6 +225,23 @@ func TestDirectRequestUsesIdentityOriginalIndexMapping(t *testing.T) {
 	}
 }
 
+func TestMissingProducerUIDUsesTheMeasuredDerivedIdentityFallback(t *testing.T) {
+	s := newScenario(t)
+	source := s.producer.PaymentError(otlpgen.WithoutRecordUID())
+
+	first := s.admitOne(t, source)
+	second := s.admitOne(t, otlpgen.Duplicate(source))
+	if first.RecordID != second.RecordID {
+		t.Fatalf("retry changed derived identity: %s != %s", first.RecordID, second.RecordID)
+	}
+	if first.RecordIDVersion != model.RecordIDVersionDerivedV1 {
+		t.Fatalf("record id version=%q, want %q", first.RecordIDVersion, model.RecordIDVersionDerivedV1)
+	}
+	if first.IdentityQuality != model.IdentityQualityDerived {
+		t.Fatalf("identity quality=%q, want derived", first.IdentityQuality)
+	}
+}
+
 func TestMappedNormalizationPreservesOriginalIndexesThroughEveryPartialBoundary(t *testing.T) {
 	s := newScenario(t)
 	hostile := otlpgen.New(otlpgen.WithService("cartservice"))
@@ -582,6 +599,48 @@ func TestEventTimestampNormalizationUsesTheDocumentedBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMissingObservedTimeUsesEventTimeWithReplayStableProvenance(t *testing.T) {
+	s := newScenario(t)
+	event := time.Date(2026, 8, 6, 12, 0, 0, 123, time.UTC)
+	source := s.producer.Record(
+		otlpgen.AtEventTime(uint64(event.UnixNano())),
+		otlpgen.AtObservedTime(0),
+		otlpgen.WithoutRecordUID(),
+	)
+
+	first := s.admitOne(t, source)
+	second := s.admitOne(t, otlpgen.Duplicate(source))
+
+	if !first.ObservedTime.Equal(event) {
+		t.Fatalf("want observed time to fall back to event time %s, got %s", event, first.ObservedTime)
+	}
+	if !first.EventTime.Equal(event) || first.TimestampInferred {
+		t.Fatalf("a supplied event time must stay authoritative, got %+v", first)
+	}
+	if !first.ObservedTimeInferred || first.ObservedTimeInferenceReason != "observed_time_missing_event_time_used" {
+		t.Fatalf("want explicit observed-time provenance, got %+v", first)
+	}
+	if first.RecordID != second.RecordID {
+		t.Fatalf("a replay changed derived identity: %s became %s", first.RecordID, second.RecordID)
+	}
+}
+
+func TestMissingEventAndObservedTimesAreCategoricallyRejected(t *testing.T) {
+	s := newScenario(t)
+	source := s.producer.Record(otlpgen.AtEventTime(0), otlpgen.AtObservedTime(0))
+
+	result, err := s.normalizer.Request(s.envelope, s.producer.Request(source))
+	if err != nil {
+		t.Fatalf("a record-local timestamp defect rejected its whole batch: %v", err)
+	}
+	if len(result.Records) != 0 || len(result.Rejected) != 1 {
+		t.Fatalf("want one record-local rejection, got %+v", result)
+	}
+	if !errors.Is(result.Rejected[0].Err, normalize.ErrMissingTimestamps) {
+		t.Fatalf("want missing-timestamps category, got %v", result.Rejected[0].Err)
 	}
 }
 

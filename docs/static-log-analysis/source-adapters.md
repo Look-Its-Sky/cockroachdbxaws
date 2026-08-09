@@ -20,10 +20,16 @@ ID. The Collector MUST NOT assign a new random UID to each receipt of an otherwi
 unidentified direct OTLP record. Universal redaction occurs before its persistent
 queue.
 
-The current local OpenTelemetry demo uses Collector `0.157.0`, receives OTLP on
-ports 4317/4318, and currently exports only to its debug exporter. Test deployment
-adds a second OTLP exporter through its extras configuration rather than changing
-application instrumentation.
+When neither native option is available, the analysis service computes the
+documented deterministic `derived:v1` identity after redaction. Its use is
+counted by `static_log_analysis_derived_identity_total`. A present but malformed
+UID never takes this fallback, because doing so could give one source record two
+identities across versions of a producer.
+
+The local deployment exposes Collector `0.157.0` on ports 4317/4318 and on the
+stable `static-log-analysis-ingress` Docker network. Another repository either
+joins instrumented services directly to that network or adds a second logs-only
+OTLP exporter to its existing Collector.
 
 ## Grafana Alloy
 

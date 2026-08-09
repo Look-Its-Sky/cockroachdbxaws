@@ -103,7 +103,9 @@ drains a replica before its volume is detached or deleted.
 Rules use event time where a valid source timestamp exists. The default allowed
 lateness is two minutes and may be overridden per rule. Observed time is retained
 separately. A missing event timestamp uses observed time and sets
-`timestamp_inferred=true`.
+`timestamp_inferred=true`. A missing observed timestamp uses event time and sets
+`observed_time_inferred=true`; missing both is a permanent record-local
+rejection.
 
 Late records may enrich an open or recently closed incident. Very late records
 do not retroactively launch another agent for an incident already investigated.

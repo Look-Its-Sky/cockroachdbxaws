@@ -263,6 +263,8 @@ func TestDurableProtobufDeterministicCompleteRoundTripAndCompatibility(t *testin
 	r.RawReference = &model.RegionalLogReference{SourceType: model.SourceTypeCloudWatch, Region: r.Region, Locator: "safe-locator", From: c.Now().Add(-time.Minute), To: c.Now(), Classification: "SENSITIVE", ExpiresAt: c.Now().Add(time.Hour)}
 	r.Redaction.RuleIDs = []string{"rule.a", "rule.b"}
 	r.Redaction.WithheldFields = []string{"attributes.7"}
+	r.ObservedTimeInferred = true
+	r.ObservedTimeInferenceReason = "observed_time_missing_event_time_used"
 
 	first, err := encodeDurable(r, "tenant", "SENSITIVE")
 	if err != nil {

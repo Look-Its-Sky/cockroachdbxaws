@@ -47,6 +47,24 @@ There is now a `source` role. `log-analysis source` drives the CloudWatch
 adapter into the journal, verified end to end against a real CloudWatch Logs
 API. It binds no listener and holds no database credential.
 
+The service now has a non-root production image, a reviewed one-shot migration
+utility, and a self-contained local Compose deployment for CockroachDB,
+LocalStack SQS, the safe combined `all` topology, the separate `outbox` role,
+and the Collector's persistent pre-redaction queue. The deployment entry point
+is `services/static-log-analysis/compose.yaml`.
+
+Cross-repository local integration is now a stable contract rather than a
+container-name convention: the Collector owns the named
+`static-log-analysis-ingress` network and alias, the Compose overlay renderer
+attaches an arbitrary instrumented service, and the smoke script proves the
+OTLP-to-SQS path. OTLP producers without a native UUIDv7 use the implemented,
+measured `derived:v1` fallback; malformed native IDs are still rejected.
+
+Envoy-style OTLP records that omit observed time but supply event time use that
+event time as a deterministic, explicitly versioned fallback. Permanent
+record-local rejections are counted through a closed unlabelled metric set, so
+discarded payloads do not erase their safe failure category.
+
 Also landed: `internal/enrich` (non-blocking deployment enrichment, wired
 through normalization and the runtime), capacity shedding wired to a live
 journal, `internal/outage` (the CockroachDB outage scenario, network severed
@@ -56,7 +74,8 @@ security.md requires before the Collector's persistent queue.
 
 Missing: a real enrichment provider and late-answer context versioning, the
 audit-event subsystem, rule reload, an operator-facing suppress/reopen API, and
-the OpenTelemetry demo scenarios. There is also an unresolved architectural
+the OpenTelemetry demo Flagd scenarios (generic Demo log forwarding is wired).
+There is also an unresolved architectural
 question — recorded in acceptance.md — about how a split `ingest` replica's
 journal is ever processed, given that journals are per-replica and non-shared.
 

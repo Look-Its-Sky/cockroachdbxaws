@@ -136,34 +136,36 @@ func (x *DurableNormalizedLog) GetLog() *NormalizedLog {
 // NormalizedLog is the redacted domain payload nested in the durable envelope.
 // Raw OTLP and diagnostic JSON are intentionally not representable here.
 type NormalizedLog struct {
-	state                    protoimpl.MessageState `protogen:"open.v1"`
-	SchemaVersion            string                 `protobuf:"bytes,1,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
-	RecordId                 string                 `protobuf:"bytes,2,opt,name=record_id,json=recordId,proto3" json:"record_id,omitempty"`
-	RecordIdVersion          string                 `protobuf:"bytes,3,opt,name=record_id_version,json=recordIdVersion,proto3" json:"record_id_version,omitempty"`
-	IdentityQuality          string                 `protobuf:"bytes,4,opt,name=identity_quality,json=identityQuality,proto3" json:"identity_quality,omitempty"`
-	BatchId                  string                 `protobuf:"bytes,5,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`
-	Source                   *TrustedEnvelope       `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
-	Region                   string                 `protobuf:"bytes,7,opt,name=region,proto3" json:"region,omitempty"`
-	EventTime                *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=event_time,json=eventTime,proto3" json:"event_time,omitempty"`
-	ObservedTime             *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=observed_time,json=observedTime,proto3" json:"observed_time,omitempty"`
-	TimestampInferred        bool                   `protobuf:"varint,10,opt,name=timestamp_inferred,json=timestampInferred,proto3" json:"timestamp_inferred,omitempty"`
-	TimestampInferenceReason string                 `protobuf:"bytes,11,opt,name=timestamp_inference_reason,json=timestampInferenceReason,proto3" json:"timestamp_inference_reason,omitempty"`
-	SeverityNumber           int32                  `protobuf:"varint,12,opt,name=severity_number,json=severityNumber,proto3" json:"severity_number,omitempty"`
-	SeverityText             string                 `protobuf:"bytes,13,opt,name=severity_text,json=severityText,proto3" json:"severity_text,omitempty"`
-	SeverityClass            string                 `protobuf:"bytes,14,opt,name=severity_class,json=severityClass,proto3" json:"severity_class,omitempty"`
-	Body                     *SafeValue             `protobuf:"bytes,15,opt,name=body,proto3" json:"body,omitempty"`
-	EventName                string                 `protobuf:"bytes,16,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
-	Attributes               map[string]*SafeValue  `protobuf:"bytes,17,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	ResourceAttributes       map[string]*SafeValue  `protobuf:"bytes,18,rep,name=resource_attributes,json=resourceAttributes,proto3" json:"resource_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	ScopeAttributes          map[string]*SafeValue  `protobuf:"bytes,19,rep,name=scope_attributes,json=scopeAttributes,proto3" json:"scope_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Service                  *ServiceIdentity       `protobuf:"bytes,20,opt,name=service,proto3" json:"service,omitempty"`
-	Deployment               *DeploymentIdentity    `protobuf:"bytes,21,opt,name=deployment,proto3" json:"deployment,omitempty"`
-	Correlation              *CorrelationIdentity   `protobuf:"bytes,22,opt,name=correlation,proto3" json:"correlation,omitempty"`
-	Exception                *NormalizedException   `protobuf:"bytes,23,opt,name=exception,proto3" json:"exception,omitempty"`
-	Redaction                *RedactionMetadata     `protobuf:"bytes,24,opt,name=redaction,proto3" json:"redaction,omitempty"`
-	RawReference             *RegionalLogReference  `protobuf:"bytes,25,opt,name=raw_reference,json=rawReference,proto3" json:"raw_reference,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	state                       protoimpl.MessageState `protogen:"open.v1"`
+	SchemaVersion               string                 `protobuf:"bytes,1,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	RecordId                    string                 `protobuf:"bytes,2,opt,name=record_id,json=recordId,proto3" json:"record_id,omitempty"`
+	RecordIdVersion             string                 `protobuf:"bytes,3,opt,name=record_id_version,json=recordIdVersion,proto3" json:"record_id_version,omitempty"`
+	IdentityQuality             string                 `protobuf:"bytes,4,opt,name=identity_quality,json=identityQuality,proto3" json:"identity_quality,omitempty"`
+	BatchId                     string                 `protobuf:"bytes,5,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`
+	Source                      *TrustedEnvelope       `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
+	Region                      string                 `protobuf:"bytes,7,opt,name=region,proto3" json:"region,omitempty"`
+	EventTime                   *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=event_time,json=eventTime,proto3" json:"event_time,omitempty"`
+	ObservedTime                *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=observed_time,json=observedTime,proto3" json:"observed_time,omitempty"`
+	TimestampInferred           bool                   `protobuf:"varint,10,opt,name=timestamp_inferred,json=timestampInferred,proto3" json:"timestamp_inferred,omitempty"`
+	TimestampInferenceReason    string                 `protobuf:"bytes,11,opt,name=timestamp_inference_reason,json=timestampInferenceReason,proto3" json:"timestamp_inference_reason,omitempty"`
+	SeverityNumber              int32                  `protobuf:"varint,12,opt,name=severity_number,json=severityNumber,proto3" json:"severity_number,omitempty"`
+	SeverityText                string                 `protobuf:"bytes,13,opt,name=severity_text,json=severityText,proto3" json:"severity_text,omitempty"`
+	SeverityClass               string                 `protobuf:"bytes,14,opt,name=severity_class,json=severityClass,proto3" json:"severity_class,omitempty"`
+	Body                        *SafeValue             `protobuf:"bytes,15,opt,name=body,proto3" json:"body,omitempty"`
+	EventName                   string                 `protobuf:"bytes,16,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
+	Attributes                  map[string]*SafeValue  `protobuf:"bytes,17,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	ResourceAttributes          map[string]*SafeValue  `protobuf:"bytes,18,rep,name=resource_attributes,json=resourceAttributes,proto3" json:"resource_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	ScopeAttributes             map[string]*SafeValue  `protobuf:"bytes,19,rep,name=scope_attributes,json=scopeAttributes,proto3" json:"scope_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Service                     *ServiceIdentity       `protobuf:"bytes,20,opt,name=service,proto3" json:"service,omitempty"`
+	Deployment                  *DeploymentIdentity    `protobuf:"bytes,21,opt,name=deployment,proto3" json:"deployment,omitempty"`
+	Correlation                 *CorrelationIdentity   `protobuf:"bytes,22,opt,name=correlation,proto3" json:"correlation,omitempty"`
+	Exception                   *NormalizedException   `protobuf:"bytes,23,opt,name=exception,proto3" json:"exception,omitempty"`
+	Redaction                   *RedactionMetadata     `protobuf:"bytes,24,opt,name=redaction,proto3" json:"redaction,omitempty"`
+	RawReference                *RegionalLogReference  `protobuf:"bytes,25,opt,name=raw_reference,json=rawReference,proto3" json:"raw_reference,omitempty"`
+	ObservedTimeInferred        bool                   `protobuf:"varint,26,opt,name=observed_time_inferred,json=observedTimeInferred,proto3" json:"observed_time_inferred,omitempty"`
+	ObservedTimeInferenceReason string                 `protobuf:"bytes,27,opt,name=observed_time_inference_reason,json=observedTimeInferenceReason,proto3" json:"observed_time_inference_reason,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
 }
 
 func (x *NormalizedLog) Reset() {
@@ -369,6 +371,20 @@ func (x *NormalizedLog) GetRawReference() *RegionalLogReference {
 		return x.RawReference
 	}
 	return nil
+}
+
+func (x *NormalizedLog) GetObservedTimeInferred() bool {
+	if x != nil {
+		return x.ObservedTimeInferred
+	}
+	return false
+}
+
+func (x *NormalizedLog) GetObservedTimeInferenceReason() string {
+	if x != nil {
+		return x.ObservedTimeInferenceReason
+	}
+	return ""
 }
 
 type TrustedEnvelope struct {
@@ -1205,7 +1221,7 @@ const file_api_proto_internal_v1_normalized_log_proto_rawDesc = "" +
 	"\x0eclassification\x18\x06 \x01(\tR\x0eclassification\x12\x1a\n" +
 	"\bproducer\x18\a \x01(\tR\bproducer\x12%\n" +
 	"\x0ecorrelation_id\x18\b \x01(\tR\rcorrelationId\x12@\n" +
-	"\x03log\x18\t \x01(\v2..static_log_analysis.internal.v1.NormalizedLogR\x03log\"\xf6\x0e\n" +
+	"\x03log\x18\t \x01(\v2..static_log_analysis.internal.v1.NormalizedLogR\x03log\"\xf1\x0f\n" +
 	"\rNormalizedLog\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\tR\rschemaVersion\x12\x1b\n" +
 	"\trecord_id\x18\x02 \x01(\tR\brecordId\x12*\n" +
@@ -1238,7 +1254,9 @@ const file_api_proto_internal_v1_normalized_log_proto_rawDesc = "" +
 	"\vcorrelation\x18\x16 \x01(\v24.static_log_analysis.internal.v1.CorrelationIdentityR\vcorrelation\x12R\n" +
 	"\texception\x18\x17 \x01(\v24.static_log_analysis.internal.v1.NormalizedExceptionR\texception\x12P\n" +
 	"\tredaction\x18\x18 \x01(\v22.static_log_analysis.internal.v1.RedactionMetadataR\tredaction\x12Z\n" +
-	"\rraw_reference\x18\x19 \x01(\v25.static_log_analysis.internal.v1.RegionalLogReferenceR\frawReference\x1ai\n" +
+	"\rraw_reference\x18\x19 \x01(\v25.static_log_analysis.internal.v1.RegionalLogReferenceR\frawReference\x124\n" +
+	"\x16observed_time_inferred\x18\x1a \x01(\bR\x14observedTimeInferred\x12C\n" +
+	"\x1eobserved_time_inference_reason\x18\x1b \x01(\tR\x1bobservedTimeInferenceReason\x1ai\n" +
 	"\x0fAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12@\n" +
 	"\x05value\x18\x02 \x01(\v2*.static_log_analysis.internal.v1.SafeValueR\x05value:\x028\x01\x1aq\n" +

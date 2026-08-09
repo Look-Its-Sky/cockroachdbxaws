@@ -59,6 +59,9 @@ Additional evidence:
 | Evidence | Gate |
 |---|---|
 | `normalize.TestARepresentativePaymentErrorIsAdmittedAndNormalized` | fast |
+| `normalize.TestMissingObservedTimeUsesEventTimeWithReplayStableProvenance` | fast |
+| `normalize.TestMissingEventAndObservedTimesAreCategoricallyRejected` | fast |
+| `pipeline.TestRecordLocalRejectionsAreCountedByClosedSafeCategory` | fast |
 | `agent.TestCheckedInAssignmentJSONSchemaCompilesAndMatchesGoldenFixtures` | fast |
 | `admission.FuzzDecodeIsTotalAndNeverExceedsItsLimits` | fast seeds, nightly fuzz |
 
@@ -293,4 +296,8 @@ runbooks.md, the CloudWatch ingestion path and the `source` role that drives it
 (acceptance 9, scenarios 1–3), capacity shedding wired to a live journal
 (scenario 9), replica drain (scenario 11's drain half), the admin health,
 readiness, and metrics surface, and the Collector persistent-queue configuration
-with its first-pass redaction.
+with its first-pass redaction. Also complete: the stable cross-repository Docker
+ingress network and overlay renderer, an OTLP-to-SQS deployment smoke script,
+and the measured deterministic `derived:v1` compatibility path for producers
+without a native UUIDv7. The OpenTelemetry Demo Collector is wired through that
+generic ingress contract, but the specific Flagd scenarios remain outstanding.

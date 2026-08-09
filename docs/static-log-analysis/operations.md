@@ -62,7 +62,15 @@ Metrics include ingestion records and bytes, rejection and partial-success count
 redaction matches and failures, journal records/bytes/oldest age, append latency,
 replay and corruption counts, rule evaluations and matches, created/deduplicated
 incidents, outbox depth and failures, agent assignments and suppressions, and
-enrichment availability.
+enrichment availability. `static_log_analysis_derived_identity_total` counts
+OTLP normalization attempts that lacked a native record UID; sustained growth is
+a producer-migration signal, not a reason to drop otherwise usable logs.
+
+Permanent record-local drops are exported as separate unlabelled counters under
+`static_log_analysis_rejected_*_total`. Invalid records use the closed safe
+subreasons `missing_timestamps`, `missing_content`, `prohibited_content`,
+`structural_validation`, and `other`; record content never appears in a metric
+name or label.
 
 Do not use trace IDs, request IDs, incident IDs, messages, or fingerprints as
 metric labels.

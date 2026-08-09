@@ -8,7 +8,7 @@ import "time"
 // NormalizedLogSchemaVersion is the major.minor version of NormalizedLog.
 // Readers accept unknown fields within the same major version; writers never
 // change the meaning or type of an existing field.
-const NormalizedLogSchemaVersion = "1.0"
+const NormalizedLogSchemaVersion = "1.1"
 
 // SourceType names the class of system a batch was admitted from.
 type SourceType string
@@ -209,6 +209,11 @@ type NormalizedLog struct {
 	// processing and TimestampInferenceReason explains why.
 	TimestampInferred        bool   `json:"timestamp_inferred"`
 	TimestampInferenceReason string `json:"timestamp_inference_reason,omitempty"`
+	// ObservedTimeInferred is set only when a source supplied event time but no
+	// observed time. The event time is used as the deterministic fallback and
+	// ObservedTimeInferenceReason records that provenance.
+	ObservedTimeInferred        bool   `json:"observed_time_inferred"`
+	ObservedTimeInferenceReason string `json:"observed_time_inference_reason,omitempty"`
 
 	SeverityNumber int32         `json:"severity_number"`
 	SeverityText   string        `json:"severity_text,omitempty"`
