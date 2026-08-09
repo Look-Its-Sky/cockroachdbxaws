@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/schema"
 	"github.com/tmc/langchaingo/vectorstores"
@@ -26,9 +29,13 @@ var (
 	sreAgent *agent.Runner
 )
 
-// mcpUnavailable is returned by the MCP-backed routes when the boot-time
-// handshake did not succeed, so the failure is legible instead of a 404.
-const mcpUnavailable = "CockroachDB MCP is not configured. Set COCKROACH_API_KEY (and optionally COCKROACH_CLUSTER_ID) and restart."
+// mcp cooked
+const mcpUnavailable = "CockroachDB MCP is not configured. Check if COCKROACH_API_KEY is set"
+
+// schemaLoadTimeout bounds the boot-time schema read. It is generous because a
+// Cloud Basic cluster can be cold, and cheap to lose: on timeout the agent just
+// discovers the schema per run as it always did.
+const schemaLoadTimeout = 60 * time.Second
 
 func initStore() {
 	connStr := os.Getenv("DATABASE_URL")
@@ -46,10 +53,24 @@ func initStore() {
 	log.Printf("Vector store: connecting to %s", utils.RedactURL(connStr))
 
 	ctx := context.Background()
+
+	// A pool rather than crdbvector's WithConnectionURL, which calls
+	// pgx.Connect and opens exactly one connection. When that connection dies
+	// — an idle timeout on the cloud cluster, a network blip — every later
+	// request fails with "conn closed" and stays broken until the process is
+	// restarted. That is not hypothetical: a smoke test run against the cloud
+	// cluster went from healthy to every route 500ing, mid-run, and stayed
+	// there. A pool reconnects on demand, which is what a long-lived container
+	// needs. crdbvector.PGXConn exists precisely so a pool can be passed here.
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		log.Fatalf("Failed to build the connection pool for %s: %v", utils.RedactURL(connStr), err)
+	}
+
 	// Initialize the vector store using our custom crdbvector, compatible with CockroachDB
 	store, err = crdbvector.New(
 		ctx,
-		crdbvector.WithConnectionURL(connStr),
+		crdbvector.WithConn(pool),
 		crdbvector.WithEmbedder(embedder),
 		// Size the vector column to the embedder so a model swap fails loudly
 		// at insert time instead of silently corrupting similarity search.
@@ -110,7 +131,30 @@ func initMCP() {
 	} else {
 		agentTools = mcp.ReadOnly(agentTools)
 	}
+
+	// Separately from safety: drop the cluster-introspection tools the prompt
+	// already tells the model to avoid. AGENT_EXCLUDE_TOOLS overrides the
+	// default list, and setting it empty offers everything.
+	excluded := mcp.DefaultExcluded
+	if raw, set := os.LookupEnv("AGENT_EXCLUDE_TOOLS"); set {
+		excluded = strings.Split(raw, ",")
+	}
+	agentTools = mcp.Exclude(agentTools, excluded)
 	sreAgent = agent.New(model, store, agentTools)
+
+	// Read the schema once here rather than letting every run rediscover it.
+	// Best-effort by design: a cluster that cannot be described at boot leaves
+	// the model to find its own way, which is exactly the previous behaviour,
+	// so this can never turn into a new reason for startup to fail.
+	schemaCtx, cancelSchema := context.WithTimeout(context.Background(), schemaLoadTimeout)
+	defer cancelSchema()
+
+	if schema, err := agent.LoadClusterSchema(schemaCtx, agentTools, nil); err != nil {
+		log.Printf("MCP: could not read the cluster schema, the agent will discover it per run: %v", err)
+	} else {
+		sreAgent.Schema = schema
+		log.Printf("MCP: cluster schema loaded (%d chars); the agent starts knowing the tables", len(schema))
+	}
 
 	scope := session.ClusterID()
 	if scope == "" {
@@ -302,6 +346,18 @@ func main() {
 
 		result, err := sreAgent.Run(c.Request.Context(), req.Question, req.Limit)
 		if err != nil {
+			// The MCP session dropping mid-run is the same class of failure as
+			// it being unavailable at boot, so report it the same way rather
+			// than as a generic 500. The trace goes out with it: it is the
+			// evidence of how far the investigation got, and losing it is what
+			// makes an outage look like the agent simply giving up.
+			if errors.Is(err, agent.ErrTransport) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error": err.Error(),
+					"trace": result.Trace,
+				})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

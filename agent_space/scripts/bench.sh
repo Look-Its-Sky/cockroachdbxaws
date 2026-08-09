@@ -25,6 +25,11 @@
 # On timeouts: curl disconnecting cancels the request context server-side, and
 # the handler correctly returns 500. A run that fails at exactly -m seconds is
 # that, not a server bug. Keep -m generous on slow local models.
+#
+# WRITES: -e store and -s insert rows into whatever database the API is pointed
+# at, once per run. Against CockroachDB Cloud that accumulates in the cluster
+# you are demoing from, so the rows are tagged BENCH and cleared with:
+#   go run ./cmd/nuke -mode=truncate
 
 set -euo pipefail
 
@@ -46,7 +51,7 @@ SEED=0
 AUTH=()
 [ -n "${API_TOKEN:-}" ] && AUTH=(-H "X-Agent-Token: $API_TOKEN")
 
-usage() { sed -n '2,28p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0; }
+usage() { sed -n '2,32p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0; }
 
 while getopts ":u:n:w:e:q:l:o:m:sh" opt; do
   case "$opt" in
@@ -77,7 +82,7 @@ RESULTS="$WORK/results.jsonl"
 # payload <endpoint> prints the request body, or nothing for GET endpoints.
 payload() {
   case "$1" in
-    store)    jq -n --arg t "benchmark row $RANDOM, synthetic, ignore." '{text: $t}' ;;
+    store)    jq -n --arg t "BENCH synthetic row $RANDOM, ignore." '{text: $t}' ;;
     retrieve) jq -n '{query: "latency regression from a new blocking call", limit: 4}' ;;
     ask)      jq -n --arg q "$QUESTION" '{question: $q}' ;;
     agent)    jq -n --arg q "$QUESTION" '{question: $q}' ;;
@@ -122,13 +127,13 @@ else
 fi
 
 if [ "$SEED" = "1" ]; then
-  echo "Seeding:   two incident rows"
+  echo "Seeding:   two incident rows (tagged BENCH)"
   while IFS= read -r text; do
     curl -sS -m 60 -o /dev/null -X POST "$API_URL/store" -H 'Content-Type: application/json' \
       "${AUTH[@]}" -d "$(jq -n --arg t "$text" '{text: $t}')"
   done <<'EOF'
-INC-412: checkout latency spiked to 8s after commit a91f3c2 added a synchronous fraud-check call in the request path. Rolled back; the proper async fix could not land same-day.
-INC-388: 500s on /cart after commit 77bd10e introduced a null map write. Hotfixed in 40 minutes with a one-line nil guard; no rollback needed.
+BENCH INC-412: checkout latency spiked to 8s after commit a91f3c2 added a synchronous fraud-check call in the request path. Rolled back; the proper async fix could not land same-day.
+BENCH INC-388: 500s on /cart after commit 77bd10e introduced a null map write. Hotfixed in 40 minutes with a one-line nil guard; no rollback needed.
 EOF
 fi
 

@@ -16,9 +16,7 @@ import (
 )
 
 // scriptedModel returns pre-written responses in order, recording the message
-// history it was given. This exercises the loop's control flow — history
-// construction, tool dispatch, termination — without spending tokens or
-// depending on a model's mood.
+// history it was given. This exercises the loop's control flow without extra tokens
 type scriptedModel struct {
 	mu        sync.Mutex
 	responses []*llms.ContentResponse
@@ -40,9 +38,13 @@ func (m *scriptedModel) GenerateContent(_ context.Context, messages []llms.Messa
 	if m.err != nil {
 		return nil, m.err
 	}
+
 	if m.calls > len(m.responses) {
-		// Standing in for a model that stops calling tools: return the last
-		// response again rather than failing the test with an index panic.
+		// The runner may ask for more turns than a test scripts: up to
+		// MaxIterations, plus one more for summarise. Repeating the last
+		// response covers the overflow without an index panic, and it is how a
+		// model that never stops calling tools is expressed — script a single
+		// tool call and every subsequent turn requests it again.
 		return m.responses[len(m.responses)-1], nil
 	}
 	return m.responses[m.calls-1], nil
@@ -164,8 +166,8 @@ func TestRunExecutesToolCallThenAnswers(t *testing.T) {
 	}
 
 	step := res.Trace[0]
-	if step.Tool != "select_query" || step.Failed {
-		t.Errorf("step = %+v, want a successful select_query", step)
+	if step.Tool != "select_query" || step.Failed || step.Cause != "" {
+		t.Errorf("step = %+v, want a successful select_query with no cause", step)
 	}
 	if step.Arguments["query"] != "SELECT count(*) FROM incidents" {
 		t.Errorf("step arguments = %v", step.Arguments)
@@ -204,6 +206,9 @@ func TestRunFeedsBadArgumentsBackToModel(t *testing.T) {
 	if len(res.Trace) != 1 || !res.Trace[0].Failed {
 		t.Fatalf("Trace = %+v, want one failed step", res.Trace)
 	}
+	if got := res.Trace[0].Cause; got != CauseInvalidArguments {
+		t.Errorf("Cause = %q, want %q", got, CauseInvalidArguments)
+	}
 	for _, want := range []string{"database", "schema"} {
 		if !strings.Contains(res.Trace[0].Output, want) {
 			t.Errorf("failure output does not name %q, so the model cannot retry: %q", want, res.Trace[0].Output)
@@ -239,6 +244,11 @@ func TestRunRecordsToolLevelErrorAsFailedButContinues(t *testing.T) {
 	if !res.Trace[0].Failed {
 		t.Error("a tool-level rejection was recorded as a successful step")
 	}
+	// Specifically a tool_error, not a transport one: the server answered, so
+	// the run must carry on rather than aborting as if the cluster were gone.
+	if got := res.Trace[0].Cause; got != CauseToolError {
+		t.Errorf("Cause = %q, want %q", got, CauseToolError)
+	}
 	// The rejection must still reach the model, or it cannot correct itself.
 	if !strings.Contains(res.Trace[0].Output, "only SELECT statements are permitted") {
 		t.Errorf("step output = %q, want the server's rejection", res.Trace[0].Output)
@@ -262,6 +272,9 @@ func TestRunRejectsUnknownTool(t *testing.T) {
 
 	if len(res.Trace) != 1 || !res.Trace[0].Failed {
 		t.Fatalf("Trace = %+v, want one failed step", res.Trace)
+	}
+	if got := res.Trace[0].Cause; got != CauseUnknownTool {
+		t.Errorf("Cause = %q, want %q", got, CauseUnknownTool)
 	}
 	// The recovery message must list what is actually available.
 	if !strings.Contains(res.Trace[0].Output, "select_query") {
@@ -342,6 +355,119 @@ func TestRunPassesRealSchemasToModel(t *testing.T) {
 	}
 }
 
+func TestRunAbortsOnTransportFailure(t *testing.T) {
+	// A dropped session is not something the model can fix by trying again, and
+	// every retry costs a full generate round trip. Before this was separated
+	// from a tool-level rejection, a dead session ran the loop to its cap and
+	// then reported "exceeded its step budget" — blaming the model for an
+	// outage, with nothing in the response naming the real cause.
+	fake := mcptest.Start(t)
+	session, err := mcp.Connect(t.Context(), mcp.Config{URL: fake.URL, APIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("mcp.Connect: %v", err)
+	}
+
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
+	}}
+	runner := New(model, stubStore{}, session.Tools())
+	runner.MaxIterations = 6
+
+	if err := session.Close(); err != nil {
+		t.Fatalf("session.Close: %v", err)
+	}
+
+	res, err := runner.Run(t.Context(), "Why is the service down?", 1)
+	if !errors.Is(err, ErrTransport) {
+		t.Fatalf("Run error = %v, want it to wrap ErrTransport", err)
+	}
+
+	// One attempt, not six: the run stops instead of re-asking a dead session.
+	if model.calls != 1 {
+		t.Errorf("model was called %d times, want 1: a dropped session must not be retried", model.calls)
+	}
+	if len(res.Trace) != 1 {
+		t.Fatalf("Trace has %d steps, want 1", len(res.Trace))
+	}
+	// The partial trace still comes back — it is the evidence of how far the
+	// investigation got before the cluster went away.
+	if step := res.Trace[0]; !step.Failed || step.Cause != CauseTransport {
+		t.Errorf("step = %+v, want a failed step caused by %q", step, CauseTransport)
+	}
+	if res.Truncated {
+		t.Error("Truncated = true, want false: the run was aborted, not cut off at the cap")
+	}
+}
+
+func TestRunContinuesWhenTheServerRejectsOneCall(t *testing.T) {
+	// The Cloud server refuses a blocked schema with a protocol error rather
+	// than a result carrying isError. That looks identical to a dead session at
+	// the call site, and treating it as one abandoned a live run that was two
+	// good tool calls in and one query away from an answer. It is a verdict on
+	// the query, not on the connection, so the model gets to try again.
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		toolResponse("call-1", "select_query",
+			`{"query": "SELECT table_name FROM information_schema.tables"}`),
+		textResponse("ROLLBACK. The implicated commit is a91f3c2."),
+	}}
+
+	runner, fake := newRunner(t, model, stubStore{})
+	res, err := runner.Run(t.Context(), "What broke?", 1)
+	if err != nil {
+		t.Fatalf("Run aborted on a recoverable rejection: %v", err)
+	}
+
+	if len(res.Trace) != 1 {
+		t.Fatalf("Trace has %d steps, want 1", len(res.Trace))
+	}
+	step := res.Trace[0]
+	if !step.Failed || step.Cause != CauseRejected {
+		t.Errorf("step = %+v, want a failed step caused by %q", step, CauseRejected)
+	}
+	// The reason has to reach the model, or it cannot pick a different query.
+	if !strings.Contains(step.Output, "restricted schema") {
+		t.Errorf("step output = %q, want the server's reason", step.Output)
+	}
+	if res.Answer != "ROLLBACK. The implicated commit is a91f3c2." {
+		t.Errorf("Answer = %q, want the run to continue past the rejection", res.Answer)
+	}
+	// It really did reach the server — this is a rejection, not a client-side
+	// argument failure that never left the process.
+	if calls := fake.Calls(); len(calls) != 1 {
+		t.Errorf("server received %+v, want the one rejected call", calls)
+	}
+}
+
+func TestSummariseWithholdsTools(t *testing.T) {
+	// summarise exists to force a model stuck in a tool loop to commit to a
+	// decision. Offering it tools again would let it keep looping, so the final
+	// call must carry none.
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
+	}}
+
+	runner, _ := newRunner(t, model, stubStore{})
+	runner.MaxIterations = 2
+
+	res, err := runner.Run(t.Context(), "Why is the service down?", 1)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatal("Truncated = false, want the run to have reached summarise")
+	}
+
+	// The scripted model never stops calling tools, so the last call it saw is
+	// necessarily the summarise one.
+	var opts llms.CallOptions
+	for _, o := range model.lastOpts {
+		o(&opts)
+	}
+	if len(opts.Tools) != 0 {
+		t.Errorf("summarise offered %d tools, want 0", len(opts.Tools))
+	}
+}
+
 func TestRunRejectsEmptyQuestion(t *testing.T) {
 	runner, _ := newRunner(t, &scriptedModel{responses: []*llms.ContentResponse{textResponse("x")}}, stubStore{})
 
@@ -397,4 +523,65 @@ func hasToolResponse(msgs []llms.MessageContent, id, contains string) bool {
 		}
 	}
 	return false
+}
+
+func TestInstructionsCarrySchemaAndTellTheModelToSkipDiscovery(t *testing.T) {
+	runner, _ := newRunner(t, &scriptedModel{responses: []*llms.ContentResponse{textResponse("x")}}, stubStore{})
+	runner.Schema = "database defaultdb\n  CREATE TABLE deploys (commit_sha STRING, deployed_at TIMESTAMPTZ)"
+
+	got := runner.instructions()
+	if !strings.Contains(got, "CREATE TABLE deploys") {
+		t.Errorf("the schema never reached the prompt:\n%s", got)
+	}
+	// Handing over the schema without saying so leaves the model free to go on
+	// calling the discovery tools anyway, which is the whole cost being removed.
+	for _, want := range []string{"list_tables", "get_table_schema", "do NOT need"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt does not tell the model to skip discovery (missing %q)", want)
+		}
+	}
+}
+
+func TestInstructionsAreUnchangedWithoutASchema(t *testing.T) {
+	// A cluster that could not be described at boot must leave behaviour
+	// exactly as it was, not append an empty and confusing section.
+	runner, _ := newRunner(t, &scriptedModel{responses: []*llms.ContentResponse{textResponse("x")}}, stubStore{})
+	runner.Schema = "   "
+
+	if got := runner.instructions(); got != systemPrompt {
+		t.Errorf("instructions changed with an empty schema:\n%s", got)
+	}
+}
+
+func TestRunReportsNotTruncatedWhenTheModelAnswers(t *testing.T) {
+	// The counterpart to TestRunStopsAtIterationCap. Truncated is the flag that
+	// says "this answer came from the fallback, not from the model deciding it
+	// was done" — so the false case has to be pinned too, or the field only
+	// ever proves one of the two things it exists to distinguish.
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
+		textResponse("ROLLBACK. The implicated commit is a91f3c2."),
+	}}
+
+	runner, _ := newRunner(t, model, stubStore{})
+	runner.MaxIterations = 6
+
+	res, err := runner.Run(t.Context(), "What broke?", 1)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if res.Truncated {
+		t.Error("Truncated = true although the model answered on its own")
+	}
+	// Stopped early rather than running to the cap.
+	if res.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2: the loop must stop when the answer arrives", res.Iterations)
+	}
+	if model.calls != 2 {
+		t.Errorf("model was called %d times, want 2: no summarise call belongs here", model.calls)
+	}
+	if res.Answer != "ROLLBACK. The implicated commit is a91f3c2." {
+		t.Errorf("Answer = %q, want the model's own words rather than the fallback", res.Answer)
+	}
 }

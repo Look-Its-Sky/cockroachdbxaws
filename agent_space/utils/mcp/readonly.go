@@ -86,3 +86,53 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
+
+// DefaultExcluded names read-only tools the SRE agent should not be offered.
+//
+// These are safe — they cannot modify anything — but they are cluster
+// introspection, and the system prompt already tells the model to leave that
+// alone: it returns large results that crowd out the incident context and
+// rarely bears on whether to roll a commit back. Telling the model was not
+// enough. It reached for show_statement anyway, and against a CockroachDB Cloud
+// Basic cluster that call does not return inside the client's 90s ceiling, so a
+// run that was moments from an answer died on a tool it had been told not to
+// use. Removing them makes the instruction structural rather than advisory.
+//
+// This is a policy about this agent, not about the tools: nothing here is
+// dangerous, and a different agent might reasonably want all of them.
+var DefaultExcluded = []string{
+	"show_statement",
+	"show_running_queries",
+}
+
+// Exclude returns the tools whose names are not in the list. Names are matched
+// exactly, because a prefix match here would silently take out neighbours.
+func Exclude(tools []*Tool, names []string) []*Tool {
+	if len(names) == 0 {
+		return tools
+	}
+
+	blocked := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			blocked[n] = true
+		}
+	}
+
+	kept := make([]*Tool, 0, len(tools))
+	var dropped []string
+	for _, t := range tools {
+		if blocked[t.Name()] {
+			dropped = append(dropped, t.Name())
+			continue
+		}
+		kept = append(kept, t)
+	}
+
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		log.Printf("MCP: withholding %d introspection %s from the agent: %s",
+			len(dropped), plural(len(dropped), "tool", "tools"), strings.Join(dropped, ", "))
+	}
+	return kept
+}

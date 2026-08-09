@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"agent_space/utils/mcp/mcptest"
 )
 
@@ -384,5 +386,87 @@ func TestNoArgToolIsCallable(t *testing.T) {
 		if !strings.Contains(out, "local-single-node") {
 			t.Errorf("Call(%q) = %q", input, out)
 		}
+	}
+}
+
+// clusterScopedTool mirrors what the Cloud server publishes for a
+// cluster-scoped tool: cluster_id sitting alongside the real arguments.
+func clusterScopedTool(clusterID string, required []any) *Tool {
+	return &Tool{
+		remote: &sdk.Tool{
+			Name:        "list_databases",
+			Description: "List databases in the cluster",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cluster_id": map[string]any{"type": "string"},
+					"database":   map[string]any{"type": "string"},
+				},
+				"required": required,
+			},
+		},
+		session: &Session{config: Config{ClusterID: clusterID}},
+	}
+}
+
+func TestSchemaHidesClusterIDWhenSessionIsScoped(t *testing.T) {
+	// The server rejects the whole call when cluster_id arrives alongside the
+	// mcp-cluster-id header, and a model shown the property will fill it in —
+	// it did, reading the real UUID out of a prior list_clusters result. The
+	// only durable fix is not to show it.
+	tool := clusterScopedTool("8fdfa73f-06b5-4fbb-a47a-7888a1bda51f", []any{"cluster_id", "database"})
+
+	schema, ok := tool.Schema().(map[string]any)
+	if !ok {
+		t.Fatalf("Schema() = %T, want map[string]any", tool.Schema())
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if _, present := props["cluster_id"]; present {
+		t.Error("cluster_id is still offered to the model")
+	}
+	if _, present := props["database"]; !present {
+		t.Errorf("the real arguments were lost: %v", props)
+	}
+
+	// Leaving it in "required" would be worse than leaving it in properties:
+	// a strict server rejects the call for omitting a required field.
+	req, _ := schema["required"].([]any)
+	for _, r := range req {
+		if r == "cluster_id" {
+			t.Errorf("required still names cluster_id: %v", req)
+		}
+	}
+	if len(req) != 1 || req[0] != "database" {
+		t.Errorf("required = %v, want [database]", req)
+	}
+
+	// The SDK's map is shared across calls, so stripping must copy.
+	raw, _ := tool.remote.InputSchema.(map[string]any)
+	rawProps, _ := raw["properties"].(map[string]any)
+	if _, present := rawProps["cluster_id"]; !present {
+		t.Error("stripping mutated the server's own schema")
+	}
+}
+
+func TestSchemaKeepsClusterIDWhenSessionIsNotScoped(t *testing.T) {
+	// Organization-wide sessions send no header, so the argument is the only
+	// way to name a cluster and must survive.
+	tool := clusterScopedTool("", []any{"cluster_id"})
+
+	schema, _ := tool.Schema().(map[string]any)
+	props, _ := schema["properties"].(map[string]any)
+	if _, present := props["cluster_id"]; !present {
+		t.Error("cluster_id was hidden from an unscoped session, leaving no way to target a cluster")
+	}
+}
+
+func TestSchemaDropsRequiredWhenClusterIDWasItsOnlyEntry(t *testing.T) {
+	// "required": [] is not valid JSON Schema, and strict OpenAI-compatible
+	// servers reject the whole tool list over it.
+	tool := clusterScopedTool("some-cluster", []any{"cluster_id"})
+
+	schema, _ := tool.Schema().(map[string]any)
+	if v, present := schema["required"]; present {
+		t.Errorf("required = %v, want the key dropped entirely", v)
 	}
 }

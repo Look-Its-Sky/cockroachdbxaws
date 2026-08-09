@@ -69,6 +69,37 @@ Deployed on **AWS App Runner** from an image in **Amazon ECR**.
 
 `/store`, `/retrieve` and `/ask` never depend on MCP. If the MCP handshake fails at boot the
 service still starts, logs why, and `/tools` and `/agent` return `503` with an actionable message.
+A session that drops *mid-run* is the same class of failure, so it gets the same `503` rather than a
+generic `500` — with the partial trace attached, since that is the evidence of how far the
+investigation got before the cluster went away.
+
+### Why a step failed
+
+Every failed step in the trace carries a `cause`, because `failed: true` on its own cannot tell
+"the model guessed at a table name" from "the MCP server fell over" — and those call for opposite
+responses:
+
+| `cause` | Meaning | The run |
+|---|---|---|
+| `tool_error` | The server ran the tool and rejected the call — refused query, missing table. | continues; the model reads the rejection and corrects itself |
+| `rejected` | The server refused to run the tool at all — a blocked schema, an argument it will not take. Arrives as a protocol error rather than a result, but it is a verdict on one call. | continues |
+| `invalid_arguments` | Arguments did not match the tool's schema, so nothing was sent. | continues; the error quotes the expected schema |
+| `unknown_tool` | The model named a tool that was never offered. | continues; the message lists what is available |
+| `malformed_call` | A tool call carrying no function at all. | continues |
+| `transport` | The call failed before the tool ran: dropped session, protocol-level rejection, cancelled context — and, most often in practice, a credential that is not authorised for the cluster. | **aborts** |
+
+The line between `rejected` and `transport` is load-bearing and easy to get wrong: the Cloud server
+answers a blocked query with a JSON-RPC error, not a result, so at the call site it is
+indistinguishable from a dropped session unless you look. Treating every returned error as fatal
+killed a live run three good tool calls in. The client therefore tests for the failures known to be
+unrecoverable — the SDK's `ErrConnectionClosed` and `ErrSessionMissing`, a cancelled context, a
+timeout — and treats everything else as the server's verdict on one call.
+
+Only `transport` aborts, and that asymmetry is the point. The first four are the agent working as
+intended — a wrong guess it can recover from. A dropped session cannot be recovered from by trying
+again, and each retry costs a full model round trip, so retrying one six times spends real money to
+arrive at a worse answer. It used to do exactly that, and then reported "the investigation exceeded
+its step budget", blaming the model for an outage.
 
 ## Setup
 
@@ -147,42 +178,45 @@ check on the vector store.
 
 ### Pointing at your own LLM
 
-Any OpenAI-compatible server works. **`OPENAI_BASE_URL` is the switch — set it and the local host
-wins:**
+Any OpenAI-compatible server works, and **one variable names each model wherever it runs**:
+`OPENROUTER_MODEL` is sent to a local server unchanged, so switching endpoints does not mean
+switching settings.
 
 ```sh
 OPENAI_BASE_URL=http://localhost:11434/v1     # Ollama
-LLM_MODEL=qwen2.5-coder:32b
-LLM_EMBEDDING_MODEL=nomic-embed-text
-VECTOR_DIMENSIONS=768
+OPENROUTER_MODEL=qwen2.5-coder:32b
 ```
 
-Precedence is per-provider rather than per-variable, because the usual way to switch is to leave
-the old settings in `.env`. With `OPENAI_BASE_URL` set, the `LLM_*` / `OPENAI_*` variables take
-precedence and the `OPENROUTER_*` ones are ignored — otherwise a leftover
-`OPENROUTER_MODEL=z-ai/glm-5.2` would be sent to Ollama, which answers with a confusing 404.
+**`OPENAI_BASE_URL` moves chat only.** Embeddings stay on OpenRouter, because the vector column is
+sized to the embedder at `CREATE TABLE`: pointing chat at a local model for cheap iteration must
+not silently swap a 1024-wide embedder for a 768-wide one and invalidate every stored vector. Chat
+is the expensive half worth running locally — one `/agent` run is ~15k tokens — while embeddings
+are ~$0.01 per million tokens, so there is little to gain and a migration to lose.
 
-The API key is optional here, since most local servers ignore it. `OPENAI_API_KEY` and
-`LLM_API_KEY` are used if set; **`OPENROUTER_API_KEY` deliberately is not** — it is a live billable
-credential, and forwarding it to an arbitrary process on localhost would leak it silently.
+The API key follows the endpoint, not the setting. `OPENAI_API_KEY` and `LLM_API_KEY` are used for
+a self-hosted server if set; **`OPENROUTER_API_KEY` is only ever sent to OpenRouter** — it is a
+live billable credential, and forwarding it to an arbitrary process on localhost would leak it
+silently. It still reaches the embedding endpoint, which is how embeddings keep working while chat
+is local.
 
-The boot log states which provider actually won, so a base URL that is not being picked up is
+The boot log states both resolutions separately, so an endpoint that is not being picked up is
 visible immediately:
 
 ```
-LLM: self-hosted at http://localhost:11434/v1 | chat: qwen2.5-coder:32b |
-     embeddings: nomic-embed-text (request dimensions omitted, column 768)
+LLM: chat: qwen2.5-coder:32b via self-hosted at http://localhost:11434/v1 |
+     embeddings: qwen/qwen3-embedding-8b via OpenRouter at https://openrouter.ai/api/v1
+     (request 1024 dims, column 1024)
 ```
 
 Two sharp edges:
 
-- **Model names are required.** Without `LLM_MODEL` the literal string `local-model` is sent.
-  Servers that serve one loaded model (llama.cpp, LM Studio) ignore the field; Ollama and vLLM
-  route by name and will reject it. A warning is logged either way.
-- **The `dimensions` field is omitted by default when self-hosted**, because most local embedding
-  servers reject it outright. The vector column still has to be sized, so set `VECTOR_DIMENSIONS`
-  to the model's native width (`nomic-embed-text` is 768, `mxbai-embed-large` is 1024). If your
-  server does accept the field, set `LLM_EMBEDDING_DIMENSIONS` and it sizes the column too.
+- **Model names are required.** Without `OPENROUTER_MODEL` the literal string `local-model` is
+  sent. Servers that serve one loaded model (llama.cpp, LM Studio) ignore the field; Ollama and
+  vLLM route by name and will reject it. A warning is logged either way.
+- **To go fully offline**, set `EMBEDDING_BASE_URL` as well. Only then is the `dimensions` field
+  omitted — most local embedding servers reject it outright — and the column has to be sized with
+  `VECTOR_DIMENSIONS` instead (`nomic-embed-text` is 768, `mxbai-embed-large` is 1024). If your
+  server does accept the field, set `OPENROUTER_EMBEDDING_DIMENSIONS` and it sizes the column too.
 
 From inside a container, reach a server on your host at `http://host.docker.internal:11434/v1`;
 the compose file sets `extra_hosts` so that resolves on Linux too.
@@ -193,11 +227,14 @@ below measures exactly that, and many small local models score badly.
 ## Resetting the vector store
 
 ```sh
-cd agent_space
-go run ./cmd/nuke                 # empty the tables, keep the schema
-go run ./cmd/nuke -mode=drop      # remove them; required after changing the embedding width
-go run ./cmd/nuke -mode=drop -yes # unattended
+./agent_space/scripts/nuke.sh                 # empty the tables, keep the schema
+./agent_space/scripts/nuke.sh -mode=drop      # remove them; required after changing the embedding width
+./agent_space/scripts/nuke.sh -mode=drop -yes # unattended
 ```
+
+`nuke.sh` is a wrapper over `cmd/nuke` that works from any directory; `cd agent_space && go run
+./cmd/nuke` is equivalent. Flags pass straight through, and the wrapper deliberately adds no `-yes`
+of its own.
 
 It prints the target with the password redacted and requires you to type `nuke` unless `-yes` is
 passed. It talks to the database directly rather than through `crdbvector`, so it needs no LLM
@@ -233,10 +270,9 @@ in `supported_parameters` is a claim about the API surface, not about behaviour,
 directly:
 
 ```sh
-cd agent_space
-go run ./cmd/toolcheck              # 20 iterations against OPENROUTER_MODEL
-go run ./cmd/toolcheck -n 40 -v     # more samples, print every iteration
-go run ./cmd/toolcheck -model qwen/qwen3-coder-next
+./agent_space/scripts/toolcheck.sh              # 20 iterations against OPENROUTER_MODEL
+./agent_space/scripts/toolcheck.sh -n 40 -v     # more samples, print every iteration
+./agent_space/scripts/toolcheck.sh -model qwen/qwen3-coder-next
 ```
 
 Measured on **2026-08-06** against `z-ai/glm-5.2`, n=20:
@@ -257,13 +293,63 @@ behaviour, which is why it is reported separately and does not gate the pass rat
 
 ## What the agent is allowed to do
 
-The agent diagnoses; it does not remediate. Of the 15 tools the MCP server advertises, it is offered
-only the 10 that cannot modify the cluster:
+The agent diagnoses; it does not remediate. It is offered only the tools that cannot modify the
+cluster. The exact counts depend on which server you are pointed at, because the two publish
+different tool sets — measured on both:
 
 ```
-discovered 15 tools, offering 10 to the agent
-withholding 5 write tools: create_database, create_table, delete_rows, insert_rows, update_rows
+self-hosted cockroachdb-mcp-server 0.1.0
+  discovered 15 tools, offering 10 to the agent
+  withholding 5 write tools: create_database, create_table, delete_rows, insert_rows, update_rows
+
+Cloud Managed MCP Server (https://cockroachlabs.cloud/mcp)
+  discovered 12 tools, offering 9 to the agent
+  withholding 3 write tools: create_database, create_table, insert_rows
 ```
+
+`delete_rows` and `update_rows` simply do not exist on the Cloud server, which is why its withheld
+count is lower rather than its exposure higher. Compare either against live `/tools` output rather
+than trusting these numbers.
+
+Separately from safety, two read-only tools are also withheld:
+
+```
+withholding 2 introspection tools from the agent: show_running_queries, show_statement
+```
+
+Nothing about them is dangerous. They are cluster introspection, which the system prompt already
+tells the model to avoid — and telling it was not enough. It reached for `show_statement` anyway,
+and against a CockroachDB Cloud Basic cluster that call does not return inside the client's 90s
+ceiling, so a run that was moments from an answer died on a tool it had been told not to use.
+Removing them makes the instruction structural rather than advisory. `AGENT_EXCLUDE_TOOLS`
+overrides the list; setting it empty offers everything.
+
+### The schema is read once, not once per run
+
+At boot the agent describes the cluster's application tables and puts them in the system prompt, so
+a run starts already knowing what exists. Without it the model spends most of its budget
+rediscovering a schema that never changes — and then runs out:
+
+| | discovering per run | schema preloaded |
+|---|---|---|
+| iterations | 6, hitting the cap | 3 |
+| tool calls | 6 | 2 |
+| of which discovery | 4 | 0 |
+| `truncated` | `true` | `false` |
+| wall clock | 47s | 35s |
+
+The four discovery results were also re-sent on every later iteration, so they cost tokens
+repeatedly. This is why `truncated` used to be true on every run: the model was not refusing to
+stop, it was never reaching a point worth stopping at.
+
+It is deliberately best-effort. A cluster that cannot be described at boot logs why and leaves the
+model to discover the schema itself, exactly as before, so this can never become a new reason for
+startup to fail.
+
+The same reasoning applies to `cluster_id`. When `COCKROACH_CLUSTER_ID` is set, the scope travels
+as a header and the Cloud server rejects any call that *also* passes the argument — so the property
+is stripped from the schema the model is shown. It had been calling `list_clusters`, reading the
+real UUID out of the result, and passing it along in good faith.
 
 `/tools` reports the same split (`discovered`, `offered_to_agent`, `withheld_writes`, and a per-tool
 `offered_to_agent` flag), so the boundary is inspectable at runtime rather than implied.
@@ -283,12 +369,67 @@ worth seeing.
 Set `AGENT_ALLOW_WRITE_TOOLS=true` to hand over the full set. There is no reason to do this for the
 demo.
 
+## API authentication
+
+`/store`, `/retrieve`, `/ask` and `/agent` sit behind a shared secret; `/ping` and `/tools` stay
+open because they are free, read-only and the parts worth demonstrating.
+
+```sh
+API_TOKEN=$(openssl rand -hex 24) go run .
+curl -X POST localhost:8080/agent -H "X-Agent-Token: $API_TOKEN" -d '{"question":"..."}'
+```
+
+`Authorization: Bearer <token>` works too. Comparison is constant-time. `scripts/demo.sh` and
+`scripts/bench.sh` pick the token up from `API_TOKEN` automatically.
+
+With `API_TOKEN` unset the middleware is a no-op so local development stays frictionless — but the
+server says so at boot, because a public deployment without it means anyone can spend your model
+credits through `/agent` and read your stored incidents through `/retrieve`.
+
+## Seeding the cluster for a demo
+
+The agent's whole premise is that it queries the *live* cluster. On an empty cluster it cannot: it
+invents plausible table names, every call fails, and it silently falls back to answering from the
+vector store alone. The answer still comes out right, which is precisely what makes it a trap.
+
+```sh
+./agent_space/scripts/seed.sh          # with a confirmation prompt
+./agent_space/scripts/seed.sh -yes     # unattended
+```
+
+`seed.sh` wraps `cmd/seed`, which applies the script over the ordinary database connection. It
+needs no container runtime and no local cluster, so the same command seeds CockroachDB Cloud — the
+older `docker exec … cockroach sql` route only ever worked against the local stack. Statements are
+executed one at a time: sent as one batch they land in a single implicit transaction, and
+CockroachDB will not drop and recreate a table inside one.
+
+It drops and recreates only `services`, `deploys` and `request_latency`. The vector store's tables
+are left alone.
+
+That creates `services`, `deploys` and `request_latency`, with a latency series that degrades
+exactly when commit `a91f3c2` ships — so the agent can *derive* the culprit rather than restate what
+the vector store already told it. Measured difference on the same question:
+
+| | tool calls | failed | answer grounded in |
+|---|---|---|---|
+| empty cluster | 8 | 6 | vector store only |
+| seeded cluster | 5 | 0 | `deploys` table + vector store |
+
 ## Tests
 
 ```sh
-cd agent_space
-go test ./...
+./agent_space/scripts/test.sh          # gofmt, build, vet, unit tests
+./agent_space/scripts/test.sh -r -c    # add the race detector and coverage
+./agent_space/scripts/test.sh -a       # also run the live API smoke test
 ```
+
+`test.sh` is the one to run before committing. It keeps going after a failing stage, so one broken
+thing does not hide the rest, and exits non-zero if any stage failed. `cd agent_space && go test
+./...` still works if you only want the unit tests.
+
+`-a` additionally runs `test_api.sh` against a running server. That is opt-in rather than automatic
+because it **writes one row** into whatever database the API points at, which may be a live cluster.
+The row is tagged `SMOKETEST-<timestamp>`; `scripts/nuke.sh` clears it.
 
 The MCP client and the agent loop are both tested against an in-process MCP server
 (`utils/mcp/mcptest`) built with the same SDK — real protocol round trips, no cloud credentials, no

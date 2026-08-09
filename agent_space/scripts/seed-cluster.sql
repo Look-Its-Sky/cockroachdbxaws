@@ -1,19 +1,3 @@
--- Demo application schema for the SRE agent.
---
---   docker exec -i cockroachdbxaws-cockroach-1 \
---     cockroach sql --insecure -d defaultdb < agent_space/scripts/seed-cluster.sql
---
--- Without this the cluster holds only langchain_pg_embedding and
--- langchain_pg_collection, so the agent has nothing meaningful to query: it
--- invents plausible table names, every call errors, and it falls back to
--- answering from the vector store alone. That still produces the right answer,
--- which is exactly what makes it a trap — the live-cluster half of the system
--- looks like it is working when it is contributing nothing.
---
--- The data is deliberately consistent with the seeded incidents: commit
--- a91f3c2 is the one that regressed checkout latency, and the numbers here
--- corroborate INC-412 rather than merely restating it.
-
 DROP TABLE IF EXISTS request_latency;
 DROP TABLE IF EXISTS deploys;
 DROP TABLE IF EXISTS services;

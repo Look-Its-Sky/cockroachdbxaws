@@ -1,7 +1,3 @@
-// Package agent runs the SRE decision loop: it grounds a question in past
-// incidents recalled from CockroachDB's vector index, then lets the model query
-// the live cluster through the CockroachDB Cloud MCP tools before committing to
-// a rollback-or-hotfix call.
 package agent
 
 import (
@@ -20,30 +16,17 @@ import (
 )
 
 const (
-	// defaultMaxIterations bounds the tool loop. Six is enough for
-	// recall -> inspect schema -> query -> decide with room to recover from a
-	// bad call, without letting a confused model spend the budget.
+	// recall -> inspect schema -> query -> decide + recovery
 	defaultMaxIterations = 6
 
 	// defaultSources is how many past incidents to recall, matching /ask.
 	defaultSources = 4
 
-	// maxToolOutputChars caps what one tool result contributes to the next
-	// prompt, so a wide result set cannot crowd out the incident context.
+	// maxToolOutputChars caps what one tool result contributes to the next prompt
 	maxToolOutputChars = 4000
-
-	// completionBudget must leave room for reasoning models that spend
-	// completion tokens before emitting any content. At 2000, one iteration in
-	// twenty ended with finish_reason "length" mid-reasoning and emitted no
-	// tool call at all — the budget ran out before the model got to the part
-	// that matters. Failing that way is silent, so the headroom is worth more
-	// than the tokens.
-	completionBudget = 4000
+	completionBudget   = 4000 // includes thinking tokens
 )
 
-// systemPrompt states the decision rule the project exists to automate. The
-// rollback-vs-hotfix criterion is deliberately explicit: it is the judgement
-// being encoded, so it belongs in the prompt rather than in the model's priors.
 const systemPrompt = `You are an SRE incident-response agent for a production service backed by CockroachDB.
 
 Your job, for each incident:
@@ -69,12 +52,16 @@ Two or three well-chosen queries are enough. When you have what you need, answer
 in prose. State the decision and the commit in the first sentence. Do not call a
 tool once you can answer.`
 
-// Runner executes agent runs. It is safe for concurrent use.
 type Runner struct {
 	Model         llms.Model
 	Store         vectorstores.VectorStore
 	Tools         []*mcp.Tool
 	MaxIterations int
+
+	// Schema is the cluster's application tables, read once at boot by
+	// LoadClusterSchema. Empty is valid and means the model discovers the
+	// schema itself, at a cost of roughly four tool calls per run.
+	Schema string
 
 	specs  []llms.Tool
 	byName map[string]*mcp.Tool
@@ -136,7 +123,7 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 
 	result := Result{Sources: len(grounding), Grounding: grounding}
 	messages := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+		llms.TextParts(llms.ChatMessageTypeSystem, r.instructions()),
 		llms.TextParts(llms.ChatMessageTypeHuman, buildPrompt(question, grounding)),
 	}
 
@@ -170,8 +157,15 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 		// have nothing to attach their tool_call_id to.
 		messages = append(messages, assistantTurn(choice, calls))
 
-		steps := r.execute(ctx, i, calls)
+		steps, err := r.execute(ctx, i, calls)
 		result.Trace = append(result.Trace, steps...)
+		if err != nil {
+			// The cluster is unreachable, so there is nothing left to inspect
+			// and no answer worth giving. Return the trace with the error: it
+			// shows what was gathered before the session dropped, and it names
+			// the outage instead of blaming the model's step budget for it.
+			return result, err
+		}
 		for j, step := range steps {
 			messages = append(messages, llms.MessageContent{
 				Role: llms.ChatMessageTypeTool,
@@ -189,6 +183,29 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 	result.Truncated = true
 	result.Answer = r.summarise(ctx, messages)
 	return result, nil
+}
+
+// instructions returns the system prompt, with the cluster's schema appended
+// when one was read at boot.
+//
+// Handing the model the schema is what makes "two or three well-chosen
+// queries" achievable rather than merely instructed: without it, two or three
+// of the queries are spent finding out which tables exist, and the budget is
+// gone before the question is asked.
+func (r *Runner) instructions() string {
+	if strings.TrimSpace(r.Schema) == "" {
+		return systemPrompt
+	}
+
+	return systemPrompt + `
+
+The live cluster's application tables are below. They were read at startup, so
+they are current and you do NOT need to call list_databases, list_tables or
+get_table_schema to find them. Go straight to the SELECT that answers the
+question. Only fall back to those tools if something you need is genuinely
+missing here.
+
+` + r.Schema
 }
 
 // recall pulls the most similar past incidents out of the vector index.
@@ -211,34 +228,57 @@ func (r *Runner) recall(ctx context.Context, question string, limit int) ([]stri
 
 // execute runs the requested tool calls, concurrently when there is more than
 // one, preserving the order the model asked for so tool_call_ids line up.
-func (r *Runner) execute(ctx context.Context, iteration int, calls []llms.ToolCall) []Step {
+//
+// The returned error is the first transport failure in call order, if any. It
+// is reported separately from the steps because it is the one failure the model
+// cannot be asked to work around.
+func (r *Runner) execute(ctx context.Context, iteration int, calls []llms.ToolCall) ([]Step, error) {
 	steps := make([]Step, len(calls))
+	errs := make([]error, len(calls))
 
 	var wg sync.WaitGroup
 	for i, call := range calls {
 		wg.Add(1)
 		go func(i int, call llms.ToolCall) {
 			defer wg.Done()
-			steps[i] = r.invoke(ctx, iteration, call)
+			steps[i], errs[i] = r.invoke(ctx, iteration, call)
 		}(i, call)
 	}
 	wg.Wait()
 
-	return steps
+	// Ordered rather than first-to-fail, so a run aborts on the same call every
+	// time regardless of how the goroutines interleaved.
+	for _, err := range errs {
+		if err != nil {
+			return steps, err
+		}
+	}
+	return steps, nil
 }
 
-// invoke runs one tool call. Bad arguments and tool-level failures come back as
-// Step.Output text rather than errors, because the model reads that text and
-// retries; only the run itself failing would justify aborting.
-func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) Step {
+// invoke runs one tool call. Bad arguments and tool-level rejections come back
+// as Step.Output text rather than errors, because the model reads that text and
+// retries.
+//
+// A transport failure is returned as an error instead. The distinction is the
+// one utils/mcp already draws — InvokeResult errors only when the call never
+// reached the server — and it has to be preserved here, because retrying a
+// dropped session costs a full model round trip per attempt and cannot
+// possibly succeed.
+func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) (Step, error) {
 	start := time.Now()
 	step := Step{Iteration: iteration}
 
-	if call.FunctionCall == nil {
+	fail := func(cause Cause, output string) (Step, error) {
 		step.Failed = true
-		step.Output = "Malformed tool call: no function specified."
+		step.Cause = cause
+		step.Output = output
 		step.DurationMS = elapsedMS(start)
-		return step
+		return step, nil
+	}
+
+	if call.FunctionCall == nil {
+		return fail(CauseMalformedCall, "Malformed tool call: no function specified.")
 	}
 
 	step.Tool = call.FunctionCall.Name
@@ -246,37 +286,42 @@ func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) 
 
 	tool, ok := r.byName[step.Tool]
 	if !ok {
-		step.Failed = true
-		step.Output = fmt.Sprintf("No tool named %q. Available tools: %s.", step.Tool, strings.Join(r.names(), ", "))
-		step.DurationMS = elapsedMS(start)
-		return step
+		return fail(CauseUnknownTool,
+			fmt.Sprintf("No tool named %q. Available tools: %s.", step.Tool, strings.Join(r.names(), ", ")))
 	}
 
 	args, err := mcp.ParseArgs(call.FunctionCall.Arguments, tool.Schema())
 	if err != nil {
-		step.Failed = true
-		step.Output = err.Error()
-		step.DurationMS = elapsedMS(start)
-		return step
+		return fail(CauseInvalidArguments, err.Error())
 	}
 	step.Arguments = args
 
 	res, err := tool.InvokeResult(ctx, args)
-	switch {
-	case err != nil:
-		step.Failed = true
-		step.Output = "Tool call failed: " + err.Error()
-	default:
-		// A tool that ran and rejected the call is still a failed step. The
-		// model gets the text either way, but a trace that calls this a
-		// success hides exactly the pattern worth seeing — six calls against a
-		// database that does not exist read as a clean run otherwise.
-		step.Failed = res.IsError
-		step.Output = clip(res.Text, maxToolOutputChars)
+	if err != nil {
+		// Not every returned error is fatal. The server rejects a call it will
+		// not run — a blocked schema, an argument it dislikes — with a protocol
+		// error rather than a result, and the model recovers from those by
+		// asking differently. Only a dead session ends the run.
+		if !mcp.IsSessionFailure(err) {
+			return fail(CauseRejected, "Tool call rejected: "+err.Error())
+		}
+		// The step is still recorded, so the trace shows how far the run got
+		// before the session dropped, but the run itself stops.
+		s, _ := fail(CauseTransport, "Tool call failed: "+err.Error())
+		return s, fmt.Errorf("%w: %w", ErrTransport, err)
 	}
 
+	// A tool that ran and rejected the call is still a failed step. The model
+	// gets the text either way, but a trace that calls this a success hides
+	// exactly the pattern worth seeing — six calls against a database that does
+	// not exist read as a clean run otherwise.
+	if res.IsError {
+		return fail(CauseToolError, clip(res.Text, maxToolOutputChars))
+	}
+
+	step.Output = clip(res.Text, maxToolOutputChars)
 	step.DurationMS = elapsedMS(start)
-	return step
+	return step, nil
 }
 
 func (r *Runner) names() []string {
@@ -356,8 +401,6 @@ func clip(s string, max int) string {
 	return s[:max] + "\n... (output truncated)"
 }
 
-// compile-time guard: Step must stay JSON-encodable, since the API returns the
-// trace verbatim.
 var _ = func() bool {
 	if _, err := json.Marshal(Step{}); err != nil {
 		panic(err)

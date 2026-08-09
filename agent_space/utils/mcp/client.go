@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"time"
@@ -39,6 +40,36 @@ const requestTimeout = 90 * time.Second
 // ErrNotConfigured signals that no API key was supplied. Callers treat this as
 // "run without MCP" rather than a failure, so the vector-only routes stay up.
 var ErrNotConfigured = errors.New("mcp: COCKROACH_API_KEY is not set")
+
+// IsSessionFailure reports whether an error from a tool call means the session
+// itself is unusable, as opposed to the server refusing that one call.
+//
+// The distinction decides whether a run can continue, and it cannot be made by
+// asking "did CallTool return an error": the Cloud server rejects a call for
+// policy reasons — a restricted schema, a malformed argument — with a JSON-RPC
+// error rather than a result carrying isError. Those are recoverable, and the
+// model routinely does recover by querying a different way. Treating every
+// returned error as fatal aborts runs that were one tool call from an answer.
+//
+// So the test is inverted: fatal only for the failures known to be fatal. The
+// SDK's WireError type is in an internal package, so its code cannot be
+// inspected — but it exports sentinels for exactly the unrecoverable cases,
+// and a timed-out or cancelled request is unrecoverable by inspection.
+func IsSessionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sdk.ErrConnectionClosed) || errors.Is(err, sdk.ErrSessionMissing) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// http.Client.Timeout surfaces as a *url.Error that does not always wrap
+	// context.DeadlineExceeded, so ask the net.Error interface directly.
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 // Config is everything needed to reach the managed MCP server.
 type Config struct {

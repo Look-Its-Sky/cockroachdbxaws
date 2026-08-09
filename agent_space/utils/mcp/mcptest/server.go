@@ -6,6 +6,7 @@ package mcptest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +103,16 @@ func Start(t *testing.T) *Server {
 		args := fake.record("select_query", req)
 
 		query, _ := args["query"].(string)
+
+		// The Cloud server refuses to touch its restricted schemas, and it
+		// says so with a protocol error rather than a result carrying isError.
+		// That distinction matters: a client that treats every returned error
+		// as a dead session will abandon a run over a single bad query, so the
+		// fake has to be able to produce this shape.
+		if strings.Contains(strings.ToLower(query), "information_schema") {
+			return nil, errors.New(`query references a restricted schema: access to "information_schema" is blocked for security reasons`)
+		}
+
 		// Mirror the real server refusing anything but a read: an error the
 		// model is meant to read and recover from, not a transport failure.
 		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "SELECT") {

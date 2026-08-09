@@ -97,3 +97,53 @@ func TestReadOnlyKeepsSessionToolsUsable(t *testing.T) {
 		}
 	}
 }
+
+func TestExcludeDropsNamedToolsOnly(t *testing.T) {
+	tools := []*Tool{
+		{remote: &sdk.Tool{Name: "select_query"}},
+		{remote: &sdk.Tool{Name: "show_statement"}},
+		{remote: &sdk.Tool{Name: "show_running_queries"}},
+		{remote: &sdk.Tool{Name: "list_tables"}},
+	}
+
+	kept := Exclude(tools, DefaultExcluded)
+
+	var names []string
+	for _, tool := range kept {
+		names = append(names, tool.Name())
+	}
+	want := []string{"select_query", "list_tables"}
+	if len(names) != len(want) {
+		t.Fatalf("kept %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("kept %v, want %v", names, want)
+		}
+	}
+}
+
+func TestExcludeMatchesWholeNamesNotPrefixes(t *testing.T) {
+	// "show_" as a prefix would take show_statement's neighbours with it, so
+	// matching is exact.
+	tools := []*Tool{
+		{remote: &sdk.Tool{Name: "show_statement"}},
+		{remote: &sdk.Tool{Name: "show_statement_details"}},
+	}
+
+	kept := Exclude(tools, []string{"show_statement"})
+	if len(kept) != 1 || kept[0].Name() != "show_statement_details" {
+		t.Errorf("Exclude removed a tool by prefix: %d kept", len(kept))
+	}
+}
+
+func TestExcludeWithNoNamesIsAPassThrough(t *testing.T) {
+	tools := []*Tool{{remote: &sdk.Tool{Name: "select_query"}}}
+	if got := Exclude(tools, nil); len(got) != 1 {
+		t.Errorf("Exclude(nil) dropped tools: %d kept", len(got))
+	}
+	// An explicitly empty AGENT_EXCLUDE_TOOLS means "offer everything".
+	if got := Exclude(tools, []string{""}); len(got) != 1 {
+		t.Errorf("Exclude with a blank name dropped tools: %d kept", len(got))
+	}
+}

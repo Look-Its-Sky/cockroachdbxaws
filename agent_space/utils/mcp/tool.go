@@ -32,9 +32,109 @@ var _ tools.Tool = (*Tool)(nil)
 // Name returns the MCP tool name.
 func (t *Tool) Name() string { return t.remote.Name }
 
+// clusterIDArg is the argument the Cloud server publishes on every
+// cluster-scoped tool, to be used only when the session is not already scoped.
+const clusterIDArg = "cluster_id"
+
 // Schema returns the tool's JSON Schema, ready to pass through as an OpenAI
 // function's parameters.
-func (t *Tool) Schema() any { return normalizeSchema(t.remote.InputSchema) }
+//
+// When the session carries a cluster ID, cluster_id is removed first: see
+// withoutProperty for why the model must not be shown it.
+func (t *Tool) Schema() any {
+	schema := normalizeSchema(t.remote.InputSchema)
+	if t.scoped() {
+		schema = withoutProperty(schema, clusterIDArg)
+	}
+	return schema
+}
+
+// scoped reports whether this session pins a cluster via the mcp-cluster-id
+// header, which changes what the server will accept as arguments.
+func (t *Tool) scoped() bool { return t.session != nil && t.session.ClusterID() != "" }
+
+// withoutProperty returns the schema with one property removed, along with any
+// mention of it in "required".
+//
+// The Cloud server publishes cluster_id on every cluster-scoped tool and
+// documents it as "Required when the MCP config has no cluster_id; otherwise
+// must be omitted". We send the scope as a header, so the argument must never
+// be sent — and the server rejects the entire call when it is, rather than
+// ignoring it. A model shown the property will eventually fill it in: it did
+// exactly that here, calling list_clusters, reading the real UUID out of the
+// result, and passing it to list_databases in good faith.
+//
+// Hiding the property makes that mistake unrepresentable instead of relying on
+// the model to infer a rule it was never told.
+func withoutProperty(schema any, name string) any {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return schema
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		return schema
+	}
+	if _, present := props[name]; !present {
+		return schema
+	}
+
+	// Copy: the schema map is derived from the SDK's Tool and shared per call.
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+
+	trimmed := make(map[string]any, len(props))
+	for k, v := range props {
+		if k != name {
+			trimmed[k] = v
+		}
+	}
+	out["properties"] = trimmed
+	// A null "required" is not valid JSON Schema, so drop the key entirely
+	// when nothing is left in it.
+	if req := withoutString(m["required"], name); req != nil {
+		out["required"] = req
+	} else {
+		delete(out, "required")
+	}
+	return out
+}
+
+// withoutString drops a name from a JSON Schema "required" list, which decodes
+// as []any or []string depending on how it reached us. Returns nil when the
+// list becomes empty, so an empty "required" is omitted rather than sent.
+func withoutString(required any, name string) any {
+	keep := func(s string) bool { return s != name }
+
+	switch list := required.(type) {
+	case []any:
+		out := make([]any, 0, len(list))
+		for _, v := range list {
+			if s, ok := v.(string); !ok || keep(s) {
+				out = append(out, v)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []string:
+		out := make([]string, 0, len(list))
+		for _, s := range list {
+			if keep(s) {
+				out = append(out, s)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return required
+	}
+}
 
 // normalizeSchema fills in the parts of a JSON Schema that MCP leaves optional
 // but strict OpenAI-compatible servers demand.
@@ -76,7 +176,9 @@ func (t *Tool) Description() string {
 	if desc == "" {
 		desc = "CockroachDB Cloud MCP tool " + t.remote.Name + "."
 	}
-	return fmt.Sprintf("%s\nInput must be a JSON object matching this schema: %s", desc, renderSchema(t.remote.InputSchema))
+	// Schema() rather than the raw InputSchema, so a scoped session does not
+	// advertise cluster_id here either.
+	return fmt.Sprintf("%s\nInput must be a JSON object matching this schema: %s", desc, renderSchema(t.Schema()))
 }
 
 // Call implements tools.Tool by parsing the model's string into structured
@@ -115,6 +217,23 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (string, error) 
 // itself, and aborting the run would deny it that chance. Only transport and
 // protocol failures return an error.
 func (t *Tool) InvokeResult(ctx context.Context, args map[string]any) (Result, error) {
+	// Belt and braces alongside hiding it from the schema: the tools.Tool path
+	// takes free-form JSON, so a model can still invent cluster_id even when it
+	// was never offered. Sending it next to the header is a hard rejection of
+	// the whole call, and silently dropping it is exactly right — the header
+	// already carries the same scope.
+	if t.scoped() {
+		if _, present := args[clusterIDArg]; present {
+			trimmed := make(map[string]any, len(args))
+			for k, v := range args {
+				if k != clusterIDArg {
+					trimmed[k] = v
+				}
+			}
+			args = trimmed
+		}
+	}
+
 	res, err := t.session.session.CallTool(ctx, &sdk.CallToolParams{
 		Name:      t.remote.Name,
 		Arguments: args,
