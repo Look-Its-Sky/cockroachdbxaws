@@ -72,7 +72,7 @@ func (c *violations) requireUTC(field string, value time.Time) {
 		return
 	}
 	if value.Location() != time.UTC {
-		c.add(field, "must be UTC, got "+value.Location().String())
+		c.add(field, "must be UTC")
 	}
 }
 
@@ -107,7 +107,7 @@ func (e TrustedEnvelope) validate(c *violations) {
 	case "":
 		c.add("source_type", "must be set")
 	default:
-		c.add("source_type", "unknown source type "+string(e.SourceType))
+		c.add("source_type", "unknown source type")
 	}
 	c.requireText("source_account", e.SourceAccount)
 	c.requireText("region", e.Region)
@@ -146,7 +146,7 @@ func (r NormalizedLog) Validate() error {
 	// A record's region must match the region of the source that authenticated
 	// it. Disagreement means a regional boundary was crossed before this point.
 	if r.Region != "" && r.Source.Region != "" && r.Region != r.Source.Region {
-		c.add("region", "must equal source.region "+r.Source.Region+", got "+r.Region)
+		c.add("region", "must equal source.region")
 	}
 
 	c.requireUTC("observed_time", r.ObservedTime)
@@ -163,7 +163,7 @@ func (r NormalizedLog) Validate() error {
 	case "":
 		c.add("severity_class", "must be set")
 	default:
-		c.add("severity_class", "unknown severity class "+string(r.SeverityClass))
+		c.add("severity_class", "unknown severity class")
 	}
 
 	// Minimum ingestion identity requires a body or an event name.
@@ -206,10 +206,31 @@ func (r NormalizedLog) Validate() error {
 	c.requireText("redaction.policy_version", r.Redaction.PolicyVersion)
 
 	if ref := r.RawReference; ref != nil {
+		switch ref.SourceType {
+		case SourceTypeOTLP, SourceTypeCloudWatch:
+		case "":
+			c.add("raw_reference.source_type", "must be set")
+		default:
+			c.add("raw_reference.source_type", "unknown source type")
+		}
 		c.requireText("raw_reference.region", ref.Region)
 		c.requireText("raw_reference.locator", ref.Locator)
-		c.requireText("raw_reference.classification", ref.Classification)
+		switch ref.Classification {
+		case "PUBLIC", "INTERNAL", "SENSITIVE", "RESTRICTED":
+		case "":
+			c.add("raw_reference.classification", "must be set")
+		default:
+			c.add("raw_reference.classification", "unknown classification")
+		}
+		c.requireUTC("raw_reference.from", ref.From)
+		c.requireUTC("raw_reference.to", ref.To)
 		c.requireUTC("raw_reference.expires_at", ref.ExpiresAt)
+		if !ref.From.IsZero() && !ref.To.IsZero() && ref.To.Before(ref.From) {
+			c.add("raw_reference.to", "must not be before raw_reference.from")
+		}
+		if !ref.To.IsZero() && !ref.ExpiresAt.IsZero() && !ref.ExpiresAt.After(ref.To) {
+			c.add("raw_reference.expires_at", "must be after raw_reference.to")
+		}
 		if ref.Region != "" && r.Region != "" && ref.Region != r.Region {
 			c.add("raw_reference.region", "must not point outside the record's region")
 		}
@@ -229,14 +250,12 @@ func validateSchemaVersion(c *violations, text string) {
 	}
 	version, err := ParseSchemaVersion(text)
 	if err != nil {
-		c.add("schema_version", "must be canonical major.minor text: "+err.Error())
+		c.add("schema_version", "must be canonical major.minor text")
 		return
 	}
 	reader := SchemaVersion{Major: NormalizedLogSchemaMajor, Minor: NormalizedLogSchemaMinor}
 	if !reader.CompatibleWith(version) {
-		c.add("schema_version", fmt.Sprintf(
-			"major version %d is not readable by this build, which reads %d.x",
-			version.Major, reader.Major))
+		c.add("schema_version", fmt.Sprintf("major version is not readable by this build, which reads %d.x", reader.Major))
 	}
 }
 
@@ -252,7 +271,7 @@ func validateIdentity(c *violations, r NormalizedLog) {
 	case "":
 		c.add("identity_quality", "must be set")
 	default:
-		c.add("identity_quality", "unknown identity quality "+string(r.IdentityQuality))
+		c.add("identity_quality", "unknown identity quality")
 	}
 
 	if strings.TrimSpace(r.RecordIDVersion) == "" {
@@ -262,8 +281,7 @@ func validateIdentity(c *violations, r NormalizedLog) {
 	}
 	spec, known := recordIDVersions[r.RecordIDVersion]
 	if !known {
-		c.add("record_id_version", fmt.Sprintf("unknown identity version %q, known versions are %s",
-			r.RecordIDVersion, strings.Join(KnownRecordIDVersions(), ", ")))
+		c.add("record_id_version", "unknown identity version; known versions are "+strings.Join(KnownRecordIDVersions(), ", "))
 		c.requireText("record_id", r.RecordID)
 		return
 	}
@@ -272,26 +290,24 @@ func validateIdentity(c *violations, r NormalizedLog) {
 	// measured and alerted. A record claiming a native version while declaring
 	// derived quality, or the reverse, would escape that measurement.
 	if r.IdentityQuality != "" && r.IdentityQuality != spec.quality {
-		c.add("identity_quality", fmt.Sprintf("version %s produces %s identity, but the record declares %s",
-			r.RecordIDVersion, spec.quality, r.IdentityQuality))
+		c.add("identity_quality", "must match the identity version")
 	}
 
-	validateHexDigest(c, "record_id", r.RecordID, spec.hexDigits, r.RecordIDVersion)
+	validateHexDigest(c, "record_id", r.RecordID, spec.hexDigits)
 }
 
-func validateHexDigest(c *violations, field, value string, digits int, version string) {
+func validateHexDigest(c *violations, field, value string, digits int) {
 	if value == "" {
 		c.add(field, "must not be empty or whitespace-only")
 		return
 	}
 	if len(value) != digits {
-		c.add(field, fmt.Sprintf("version %s produces %d lowercase hex characters, got %d",
-			version, digits, len(value)))
+		c.add(field, fmt.Sprintf("identity version produces %d lowercase hex characters, got %d", digits, len(value)))
 		return
 	}
 	for _, r := range value {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			c.add(field, fmt.Sprintf("version %s produces lowercase hex, got %q", version, value))
+			c.add(field, "identity version produces lowercase hex")
 			return
 		}
 	}
@@ -299,12 +315,13 @@ func validateHexDigest(c *violations, field, value string, digits int, version s
 
 func validateAttributes(c *violations, field string, attributes map[string]SafeValue) {
 	// Sorted so that violation output does not depend on map iteration order.
-	for _, key := range sortedKeys(attributes) {
+	for index, key := range sortedKeys(attributes) {
+		ordinalField := fmt.Sprintf("%s[%d]", field, index)
 		if strings.TrimSpace(key) == "" {
-			c.add(field, "attribute keys must not be empty or whitespace-only")
+			c.add(ordinalField, "attribute key must not be empty or whitespace-only")
 			continue
 		}
-		child := c.nested(fmt.Sprintf("%s[%s]", field, key))
+		child := c.nested(ordinalField)
 		attributes[key].validate(child)
 		c.merge(child)
 	}
@@ -325,7 +342,7 @@ func validateStatus(c *violations, field string, status EnrichmentStatus) {
 	case "":
 		c.add(field, "must be set")
 	default:
-		c.add(field, "unknown enrichment status "+string(status))
+		c.add(field, "unknown enrichment status")
 	}
 }
 
@@ -356,6 +373,14 @@ func (v SafeValue) Validate() error {
 }
 
 func (v SafeValue) validate(c *violations) {
+	v.validateDepth(c, 0)
+}
+
+func (v SafeValue) validateDepth(c *violations, depth int) {
+	if depth > 64 {
+		c.add("structure", "nesting exceeds validation limit")
+		return
+	}
 	// A value's payload must match its kind exactly. A mismatch means the value
 	// was built by literal rather than through a constructor, and some consumer
 	// will read the wrong field.
@@ -395,28 +420,29 @@ func (v SafeValue) validate(c *violations) {
 			c.add("withheld", "must carry a reason")
 		}
 	default:
-		c.add("kind", "unknown value kind "+string(v.Kind))
+		c.add("kind", "unknown value kind")
 		return
 	}
 
 	for _, kind := range set {
 		if kind != v.Kind {
-			c.add("kind", fmt.Sprintf("is %s but a %s payload is set", v.Kind, kind))
+			c.add("kind", "kind and payload disagree")
 		}
 	}
 
-	for _, key := range sortedKeys(v.Map) {
+	for index, key := range sortedKeys(v.Map) {
+		ordinalField := fmt.Sprintf("map[%d]", index)
 		if strings.TrimSpace(key) == "" {
-			c.add("map", "keys must not be empty or whitespace-only")
+			c.add(ordinalField, "key must not be empty or whitespace-only")
 			continue
 		}
-		nested := c.nested(fmt.Sprintf("map[%s]", key))
-		v.Map[key].validate(nested)
+		nested := c.nested(ordinalField)
+		v.Map[key].validateDepth(nested, depth+1)
 		c.merge(nested)
 	}
 	for i, child := range v.Slice {
 		nested := c.nested(fmt.Sprintf("slice[%d]", i))
-		child.validate(nested)
+		child.validateDepth(nested, depth+1)
 		c.merge(nested)
 	}
 }

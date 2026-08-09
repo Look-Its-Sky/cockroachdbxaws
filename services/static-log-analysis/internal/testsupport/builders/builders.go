@@ -36,7 +36,7 @@ const (
 	DefaultCredentialIdentity = "spiffe://example.internal/ns/observability/sa/collector"
 	DefaultDeploymentID       = "paymentservice-7f4c9a1"
 	DefaultDeploymentVersion  = "2026.3.4"
-	DefaultRedactionPolicy    = "1.0"
+	DefaultRedactionPolicy    = "2.2"
 
 	// DefaultEventLag is how far a record's event time sits before its observed
 	// time: recent enough to be used as-is rather than inferred.
@@ -331,6 +331,17 @@ func WithEnvironment(environment string) RecordOption {
 	}
 }
 
+// WithoutEnvironment removes the environment claim and marks service identity
+// incomplete. Such a record remains valid evidence but cannot drive a
+// service-specific investigation.
+func WithoutEnvironment() RecordOption {
+	return func(r *model.NormalizedLog, _ *recordSettings) {
+		r.Service.Environment = ""
+		r.Service.Status = model.EnrichmentNotAvailable
+		delete(r.ResourceAttributes, "deployment.environment.name")
+	}
+}
+
 // WithoutService removes service identity, which prevents service-specific
 // agent execution while still allowing ingestion.
 func WithoutService() RecordOption {
@@ -484,7 +495,7 @@ func WithRawReference(locator string, expires time.Time) RecordOption {
 			Locator:        locator,
 			From:           r.EventTime,
 			To:             r.ObservedTime,
-			Classification: "restricted",
+			Classification: "RESTRICTED",
 			ExpiresAt:      expires,
 		}
 	}

@@ -45,7 +45,9 @@ and similar historical incidents.
 - [Agent assignment and context contract](agent-contract.md)
 - [Security, redaction, and retention](security.md)
 - [Failure handling and operations](operations.md)
+- [Operational runbooks](runbooks.md)
 - [Test strategy and acceptance criteria](testing.md)
+- [Requirement acceptance evidence](acceptance.md)
 - [Architecture decisions](decisions/README.md)
 - [Terminology](glossary.md)
 

@@ -24,6 +24,50 @@ Selected correlatable values become keyed regional HMAC tokens. Keys are stored
 in the regional secret system, versioned, access controlled, and rotated through
 a documented dual-read transition. Hashes never use an unkeyed sensitive value.
 
+Opaque text normalizes CRLF and bare CR boundaries before applying line-based
+rules, so alternate line endings cannot hide authorization, cookie, or secret
+assignments. JSON carried inside a string is token-preflighted before recursive
+materialization, with a maximum depth of 16 and 10,000 container/scalar value
+nodes. An over-limit JSON value is withheld rather than partially represented.
+The same bounded preflight tracks decoded keys within each object. Duplicate
+keys, including escape-equivalent spellings, withhold the whole structured value
+before map materialization; reusing a key in separate sibling objects is valid.
+Opaque assignment labels adjacent to `:` or `=` fail closed when they contain
+non-ASCII characters or Unicode escapes. This deliberately withholds some
+ordinary Unicode `label: value` prose: finite confusable-character tables cannot
+prove an unknown label is not a disguised credential name. ASCII timestamps and
+ASCII labels carrying Unicode values remain admissible.
+
+Structural field names use a stricter boundary than prose: any non-ASCII,
+invalid-UTF-8, or Unicode-escaped OTLP key is withheld together with its value.
+When duplicate or redaction-normalized keys collide, every ambiguous member is
+withheld under deterministic non-secret ordinals; no first value is retained.
+The persistence-facing final scan reapplies the same strict key validation to
+top-level and nested maps. It accepts generated withheld-key ordinals only when
+their values are typed as withheld metadata. A known-sensitive ASCII key is
+accepted only with the canonical `[REDACTED_FIELD]` value produced by the
+normalizer.
+
+Errors crossing admission, normalization, model-validation, and safe-value JSON
+boundaries are categorical and opaque. They identify stable error classes and
+non-secret structural ordinals, but never copy rejected field names, values,
+claims, identifiers, enum text, schema text, locations, or parser details from
+untrusted input into an error string.
+
+The baseline service-aware policy version `2.2` removes complete assignments
+for customer/session identifiers, request bodies, query parameters, and payment
+card/PAN/CVV/CVC fields across underscore, dot, and hyphen variants. It also
+recognizes Unicode local parts and internationalized email domains. Truly
+service-specific customer payloads remain configured forbidden values; the
+baseline does not claim to infer arbitrary custom field semantics.
+
+Policy-generated text is byte-idempotent: applying the text policy again does
+not change its bytes. A marker already present in raw input is retained only with
+`safety.preexisting_marker` provenance; an exact
+`[CONTENT_WITHHELD_REDACTION_FAILURE]` input becomes typed withheld metadata at
+the first safe-value boundary. Thus provenance and type may be added on that
+first boundary even though the marker bytes themselves remain stable.
+
 ## Redaction failure
 
 When content cannot be proven safe:

@@ -29,6 +29,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check generated Protobuf bindings
+        run: ./scripts/check-generated-proto.sh
+
       - name: Vet
         # Both tag sets: without the second pass, a mistake in an
         # integration-tagged file is invisible until the integration job runs,
@@ -59,7 +62,17 @@ jobs:
           go-version-file: services/static-log-analysis/go.mod
           cache-dependency-path: services/static-log-analysis/go.sum
 
+      - name: Vet integration build
+        run: go vet -tags=integration ./...
+
       - name: Test with race detector
         env:
           REQUIRE_DOCKER: "1"
-        run: go test -race -tags=integration -timeout=20m ./...
+        # -p 1 is a resource bound, not a correctness workaround. Each test
+        # binary starts its own CockroachDB container for its whole run, so the
+        # default per-CPU package parallelism puts several of them on one runner
+        # at once, under the race detector. That has already killed a container
+        # mid-run and failed every remaining test with "connection refused",
+        # which reads like a storage bug and is not one. Serialized, the whole
+        # job is about six minutes.
+        run: go test -p 1 -race -tags=integration -timeout=20m ./...

@@ -2,9 +2,11 @@ package model
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strings"
 )
+
+var ErrInvalidSafeValueJSON = errors.New("model: invalid SafeValue JSON")
 
 // JSON here is a readable, round-trippable representation used for fixtures,
 // diagnostics, and agent-facing payloads. It is not the durable internal
@@ -25,6 +27,9 @@ type safeValueJSON struct {
 // so that every non-empty kind always carries a payload and a decoder can treat
 // a missing one as malformed.
 func (v SafeValue) MarshalJSON() ([]byte, error) {
+	if err := v.Validate(); err != nil {
+		return nil, ErrInvalidSafeValueJSON
+	}
 	if v.Kind == SafeKindEmpty {
 		return []byte("null"), nil
 	}
@@ -58,12 +63,12 @@ func (v SafeValue) MarshalJSON() ([]byte, error) {
 		out.Reason = v.Withheld
 		return json.Marshal(out)
 	default:
-		return nil, fmt.Errorf("model: cannot encode unknown value kind %q", v.Kind)
+		return nil, ErrInvalidSafeValueJSON
 	}
 
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("model: encoding %s value: %w", v.Kind, err)
+		return nil, ErrInvalidSafeValueJSON
 	}
 	out.Value = encoded
 	return json.Marshal(out)
@@ -84,30 +89,30 @@ func (v *SafeValue) UnmarshalJSON(data []byte) error {
 
 	var in safeValueJSON
 	if err := json.Unmarshal(data, &in); err != nil {
-		return fmt.Errorf("model: decoding value: %w", err)
+		return ErrInvalidSafeValueJSON
 	}
 
 	hasPayload := len(in.Value) > 0 && string(in.Value) != "null"
 
 	if in.Kind == SafeKindWithheld {
 		if hasPayload {
-			return fmt.Errorf("model: withheld content must not carry a value")
+			return ErrInvalidSafeValueJSON
 		}
 		if strings.TrimSpace(in.Reason) == "" {
-			return fmt.Errorf("model: withheld content must carry a reason")
+			return ErrInvalidSafeValueJSON
 		}
 		*v = SafeValue{Kind: SafeKindWithheld, Withheld: in.Reason}
 		return nil
 	}
 	if in.Reason != "" {
-		return fmt.Errorf("model: a %s value must not carry a withheld reason", in.Kind)
+		return ErrInvalidSafeValueJSON
 	}
 
 	decoded := SafeValue{Kind: in.Kind}
 	var target any
 	switch in.Kind {
 	case SafeKindEmpty:
-		return fmt.Errorf("model: value has no kind")
+		return ErrInvalidSafeValueJSON
 	case SafeKindString:
 		target = &decoded.String
 	case SafeKindInt:
@@ -121,14 +126,14 @@ func (v *SafeValue) UnmarshalJSON(data []byte) error {
 	case SafeKindSlice:
 		target = &decoded.Slice
 	default:
-		return fmt.Errorf("model: unknown value kind %q", in.Kind)
+		return ErrInvalidSafeValueJSON
 	}
 
 	if !hasPayload {
-		return fmt.Errorf("model: a %s value requires a payload", in.Kind)
+		return ErrInvalidSafeValueJSON
 	}
 	if err := json.Unmarshal(in.Value, target); err != nil {
-		return fmt.Errorf("model: decoding %s value: %w", in.Kind, err)
+		return ErrInvalidSafeValueJSON
 	}
 	*v = decoded
 	return nil

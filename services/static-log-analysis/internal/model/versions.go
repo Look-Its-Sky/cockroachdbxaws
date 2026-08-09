@@ -1,11 +1,14 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+var ErrInvalidSchemaVersion = errors.New("model: invalid schema version")
 
 // Persisted structures carry a major and minor schema version. A reader accepts
 // any minor version within the major it understands, because a writer may add
@@ -40,34 +43,34 @@ func (v SchemaVersion) CompatibleWith(other SchemaVersion) bool { return v.Major
 func ParseSchemaVersion(text string) (SchemaVersion, error) {
 	major, minor, found := strings.Cut(text, ".")
 	if !found {
-		return SchemaVersion{}, fmt.Errorf("schema version %q is not major.minor", text)
+		return SchemaVersion{}, ErrInvalidSchemaVersion
 	}
 	majorValue, err := parseVersionPart(major)
 	if err != nil {
-		return SchemaVersion{}, fmt.Errorf("schema version %q has an invalid major: %w", text, err)
+		return SchemaVersion{}, ErrInvalidSchemaVersion
 	}
 	minorValue, err := parseVersionPart(minor)
 	if err != nil {
-		return SchemaVersion{}, fmt.Errorf("schema version %q has an invalid minor: %w", text, err)
+		return SchemaVersion{}, ErrInvalidSchemaVersion
 	}
 	return SchemaVersion{Major: majorValue, Minor: minorValue}, nil
 }
 
 func parseVersionPart(text string) (int, error) {
 	if text == "" {
-		return 0, fmt.Errorf("part is empty")
+		return 0, ErrInvalidSchemaVersion
 	}
 	if len(text) > 1 && text[0] == '0' {
-		return 0, fmt.Errorf("part %q has a leading zero", text)
+		return 0, ErrInvalidSchemaVersion
 	}
 	for _, r := range text {
 		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("part %q is not a decimal number", text)
+			return 0, ErrInvalidSchemaVersion
 		}
 	}
 	value, err := strconv.Atoi(text)
 	if err != nil {
-		return 0, fmt.Errorf("part %q is not a decimal number", text)
+		return 0, ErrInvalidSchemaVersion
 	}
 	return value, nil
 }

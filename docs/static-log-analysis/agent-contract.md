@@ -8,21 +8,41 @@ SQS carries a small immutable pointer, not full evidence:
 {
   "schema_version": "1.0",
   "message_id": "uuidv7",
-  "message_type": "investigation.requested",
-  "incident_id": "uuidv7",
-  "incident_generation": 1,
-  "investigation_id": "uuidv7",
-  "region": "us-east-1",
-  "service_id": "payment",
-  "environment": "production",
-  "severity": "critical",
+  "message_type": "agent.assignment.v1",
   "created_at": "2026-08-06T18:04:51Z",
+  "region": "us-east-1",
+  "tenant_id": "tenant-a",
+  "classification": "SENSITIVE",
+  "producer": "static-log-analysis",
+  "correlation_id": "uuidv7",
+  "incident_id": "64-character-lowercase-m1-hash",
+  "incident_generation": 8675309,
+  "investigation_id": "uuidv7",
+  "service_id": "paymentservice",
+  "environment": "production",
+  "severity": "error",
   "context_version": 1
 }
 ```
 
 The orchestrator retrieves the full package from CockroachDB using its scoped
-identity. Queue duplication and reordering are expected.
+identity. Queue duplication and reordering are expected. The generation is an
+opaque positive deterministic M1 key, not a display ordinal. Assignment JSON is
+the closed, bounded `api/schema/agent/v1/assignment.schema.json` contract:
+unknown fields, missing fields, non-UTC timestamps, different major versions,
+and a message/envelope value that disagrees with the transactional outbox row
+are rejected before publish or consume.
+For assignment v1, `correlation_id` is exactly `investigation_id`; this gives all
+delivery attempts and downstream diagnostics one stable UUIDv7 correlation key
+without inventing a second investigation correlation identity.
+
+Assignment v1 has one closed custom routing-attribute set: exactly
+`{"region":"<assignment region>"}`. A missing region, a different region, or any
+additional custom attribute is rejected before the outbox write and checked again
+before claim. The outbox also stores a domain-separated v1 SHA-256 content digest
+over every immutable routing/publish field, the exact payload bytes, and
+key-sorted length-delimited attributes. Claim recomputes and constant-time compares
+that digest before semantic routing checks or claim mutation.
 
 ## Initial investigation package
 

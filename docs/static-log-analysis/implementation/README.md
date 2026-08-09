@@ -8,6 +8,9 @@ behavior. The words MUST, MUST NOT, SHOULD, and MAY are normative.
 - [Journal contract](journal.md)
 - [CockroachDB schema and transactions](database.md)
 - [Versioned API and data schemas](schemas.md)
+- [Runtime, roles, and OTLP ingress](runtime.md)
+- [CloudWatch Logs source adapter](cloudwatch-source.md)
+- [Milestone 5 vertical slice](vertical-slice.md)
 - [TDD implementation plan](tdd-plan.md)
 - [Test harness](test-harness.md)
 

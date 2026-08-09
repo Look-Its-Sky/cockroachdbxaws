@@ -43,7 +43,7 @@ alerts. It never acknowledges a silently dropped mandatory record.
 | Publish acknowledged but DB update fails | Outbox republishes; orchestrator deduplicates |
 | Metadata provider unavailable | Process with available fields and enrich later |
 | Rule reload invalid | Previous immutable ruleset remains active |
-| Journal near full | Priority shedding and backpressure policy applies |
+| Journal near full | Priority shedding and backpressure policy applies (see runtime.md) |
 | Journal corruption | Stop unsafe partition, alert, preserve files, follow recovery runbook |
 | Clock skew | Prefer source event time within validation bounds; expose skew metrics |
 | Agent dies | Lease expires and same investigation is reassigned |
@@ -67,6 +67,11 @@ enrichment availability.
 Do not use trace IDs, request IDs, incident IDs, messages, or fingerprints as
 metric labels.
 
+The counters that exist today are served as Prometheus text on the admin
+listener's `/metrics`, alongside `/healthz` and `/readyz`. See runtime.md. They
+are unlabelled by construction. Ingestion byte counts, append latency, rule
+evaluation counts, and outbox depth are not yet exported.
+
 ## Initial SLO targets
 
 These are design targets and require production validation:
@@ -84,6 +89,10 @@ These are design targets and require production validation:
   stage, and the maintained regression corpus has zero known secret escapes.
 
 ## Operational runbooks required before production
+
+Written in [runbooks.md](runbooks.md). Three of the twelve document a lever
+that does not exist yet and say so explicitly rather than describing a procedure
+an operator cannot follow.
 
 - Journal capacity exhaustion and recovery.
 - Journal corruption and read-only preservation.

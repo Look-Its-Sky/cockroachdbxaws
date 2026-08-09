@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/ids"
 )
@@ -29,35 +30,58 @@ type Message struct {
 	// Body is the versioned serialized payload.
 	Body []byte
 	// Attributes carry routing and diagnostic metadata. They never carry log
-	// derived content.
+	// derived content. Individual catalogue entries may close this set further;
+	// agent.assignment.v1 permits exactly its scoped region attribute.
 	Attributes map[string]string
 }
 
-// Publishing limits.
-//
-// These are this service's limits, not a mirror of whatever the transport
-// currently permits. They are chosen to fit SQS Standard, but a message that
-// satisfies them is a message this service is willing to produce, and a change
-// in the transport's own limits does not silently change what this service
-// emits. A payload approaching either bound is a design problem in the payload:
-// assignments carry pointers and scheduling metadata, not evidence.
+// Publishing limits. The transport maximum and the application's deliberately
+// smaller safety limit have different names because changing an AWS limit must
+// not silently change what this service is willing to put in an assignment.
 const (
-	// MaxMessageBytes bounds one whole message: the body plus each attribute's
-	// name, declared data type, and value, matching how the transport bills a
-	// message rather than how the body alone reads.
-	MaxMessageBytes = 256 * 1024
+	// SQSMaxMessageBytes is Amazon SQS's hard maximum for one message, including
+	// its body and message attributes.
+	SQSMaxMessageBytes = 1024 * 1024
+
+	// ApplicationSafetyMaxMessageBytes is the smaller limit this service elects
+	// to publish. Assignments carry pointers and scheduling metadata rather than
+	// evidence, so approaching even this limit indicates a payload design error.
+	ApplicationSafetyMaxMessageBytes = 256 * 1024
 
 	// MaxAttributes bounds how many attributes a message may carry.
 	MaxAttributes = 10
+	// RequiredSQSAttributes is the domain metadata every message maps to String
+	// attributes so an unordered, at-least-once consumer can identify it.
+	RequiredSQSAttributes = 3
+	// MaxCustomAttributes leaves room for the required metadata within SQS's
+	// ten-attribute hard maximum.
+	MaxCustomAttributes = MaxAttributes - RequiredSQSAttributes
 
 	// MaxAttributeNameBytes bounds one attribute name.
 	MaxAttributeNameBytes = 256
 )
 
-// AttributeDataType is the declared type of every attribute this service
-// publishes. Attributes carry routing and diagnostic metadata as text; nothing
-// binary and nothing log-derived travels in them.
-const AttributeDataType = "String"
+// SQSStringAttributeDataType is the DataType used when each Attributes entry is
+// mapped to an SQS MessageAttributeValue. The map key becomes the SQS attribute
+// name and the map value becomes StringValue. Attributes carry routing and
+// diagnostic metadata only; nothing binary and nothing log-derived travels in
+// them.
+const SQSStringAttributeDataType = "String"
+
+// Required SQS message-attribute names. SQS Standard has no native
+// deduplication-key or application message-type field, so these values must be
+// carried explicitly rather than mistaken for SQS's transport-assigned ID.
+const (
+	SQSAttributeMessageID        = "message_id"
+	SQSAttributeDeduplicationKey = "deduplication_key"
+	SQSAttributeMessageType      = "message_type"
+)
+
+var requiredSQSAttributeNames = map[string]bool{
+	SQSAttributeMessageID:        true,
+	SQSAttributeDeduplicationKey: true,
+	SQSAttributeMessageType:      true,
+}
 
 // reservedAttributePrefixes are refused by the transport because it uses them
 // itself. Rejecting them here means the outbox row never becomes unpublishable.
@@ -65,9 +89,9 @@ var reservedAttributePrefixes = []string{"aws.", "amazon."}
 
 // Validate reports whether a message is structurally publishable.
 //
-// It does not yet check that Type names a known payload schema or that the
-// payload matches it. That check belongs with the message catalogue, which
-// arrives with the agent contract schemas.
+// It does not check that Type names a known payload schema or that the payload
+// matches it. The typed agent message catalogue performs that domain check at
+// the persistence write and claim boundaries.
 func (m Message) Validate() error {
 	var problems []string
 	if strings.TrimSpace(m.MessageID) == "" {
@@ -79,19 +103,26 @@ func (m Message) Validate() error {
 	}
 	if strings.TrimSpace(m.DeduplicationKey) == "" {
 		problems = append(problems, "deduplication_key must not be empty or whitespace-only")
+	} else if !validSQSText([]byte(m.DeduplicationKey)) {
+		problems = append(problems, "deduplication_key must be valid SQS text")
 	}
 	if strings.TrimSpace(m.Type) == "" {
 		problems = append(problems, "type must not be empty or whitespace-only")
+	} else if !validSQSText([]byte(m.Type)) {
+		problems = append(problems, "type must be valid SQS text")
 	}
 	if len(m.Body) == 0 {
 		problems = append(problems, "body must not be empty")
+	} else if !validSQSText(m.Body) {
+		problems = append(problems, "body must be valid SQS text")
 	}
 	problems = append(problems, m.attributeProblems()...)
-	if size := m.Size(); size > MaxMessageBytes {
+	if size := m.SQSSize(); size > ApplicationSafetyMaxMessageBytes {
 		// Discovering this at the transport would strand an outbox row that can
 		// never be published, so it is rejected where it is still fixable.
-		problems = append(problems, fmt.Sprintf("message is %d bytes, over the %d byte limit",
-			size, MaxMessageBytes))
+		problems = append(problems, fmt.Sprintf(
+			"message is %d bytes, over the %d byte application safety limit (SQS hard maximum is %d bytes)",
+			size, ApplicationSafetyMaxMessageBytes, SQSMaxMessageBytes))
 	}
 	if len(problems) == 0 {
 		return nil
@@ -103,9 +134,11 @@ func (m Message) Validate() error {
 // unpublishable, in a deterministic order.
 func (m Message) attributeProblems() []string {
 	var problems []string
-	if len(m.Attributes) > MaxAttributes {
-		problems = append(problems, fmt.Sprintf("message carries %d attributes, over the limit of %d",
-			len(m.Attributes), MaxAttributes))
+	total := RequiredSQSAttributes + len(m.Attributes)
+	if total > MaxAttributes {
+		problems = append(problems, fmt.Sprintf(
+			"message maps to %d attributes (%d required and %d custom), over the limit of %d",
+			total, RequiredSQSAttributes, len(m.Attributes), MaxAttributes))
 	}
 
 	names := make([]string, 0, len(m.Attributes))
@@ -115,6 +148,9 @@ func (m Message) attributeProblems() []string {
 	sort.Strings(names)
 
 	for _, name := range names {
+		if requiredSQSAttributeNames[name] {
+			problems = append(problems, "attribute "+quote(name)+" is reserved for required transport metadata")
+		}
 		if problem := attributeNameProblem(name); problem != "" {
 			problems = append(problems, "attribute name "+quote(name)+" "+problem)
 		}
@@ -122,9 +158,30 @@ func (m Message) attributeProblems() []string {
 			// An attribute declared with no value is dropped by the transport,
 			// so a consumer routing on it would silently stop matching.
 			problems = append(problems, "attribute "+quote(name)+" must have a value")
+		} else if !validSQSText([]byte(m.Attributes[name])) {
+			problems = append(problems, "attribute "+quote(name)+" must be valid SQS text")
 		}
 	}
 	return problems
+}
+
+// validSQSText implements the XML-compatible Unicode repertoire SQS accepts:
+// tab, line feed, carriage return, and scalar values in the documented ranges.
+func validSQSText(value []byte) bool {
+	if !utf8.Valid(value) {
+		return false
+	}
+	for _, r := range string(value) {
+		switch {
+		case r == '\t', r == '\n', r == '\r':
+		case r >= 0x20 && r <= 0xD7FF:
+		case r >= 0xE000 && r <= 0xFFFD:
+		case r >= 0x10000 && r <= 0x10FFFF:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func attributeNameProblem(name string) string {
@@ -157,12 +214,27 @@ func attributeNameProblem(name string) string {
 	return ""
 }
 
-// Size returns the bytes this message counts against MaxMessageBytes: the body
-// plus each attribute's name, declared data type, and value.
-func (m Message) Size() int {
-	size := len(m.Body)
+// SQSAttributes maps the domain metadata plus custom attributes to the String
+// attributes a concrete SQS publisher will send. It returns a fresh map so a
+// caller cannot mutate the Message through the mapping.
+func (m Message) SQSAttributes() map[string]string {
+	attributes := make(map[string]string, RequiredSQSAttributes+len(m.Attributes))
 	for name, value := range m.Attributes {
-		size += len(name) + len(AttributeDataType) + len(value)
+		attributes[name] = value
+	}
+	attributes[SQSAttributeMessageID] = m.MessageID
+	attributes[SQSAttributeDeduplicationKey] = m.DeduplicationKey
+	attributes[SQSAttributeMessageType] = m.Type
+	return attributes
+}
+
+// SQSSize returns the bytes the intended SQS mapping counts toward the message
+// limit: MessageBody plus every mapped MessageAttribute name, DataType, and
+// StringValue.
+func (m Message) SQSSize() int {
+	size := len(m.Body)
+	for name, value := range m.SQSAttributes() {
+		size += len(name) + len(SQSStringAttributeDataType) + len(value)
 	}
 	return size
 }

@@ -79,4 +79,6 @@ The service is complete when automated evidence demonstrates that it can:
 10. Enforce redaction, authorization, retention, and regional boundaries.
 
 Every acceptance item must link to named automated tests and retained CI results
-before production approval.
+before production approval. Those links are maintained in
+[acceptance.md](acceptance.md), which records the current status of each item
+and names the gate every cited test runs in.

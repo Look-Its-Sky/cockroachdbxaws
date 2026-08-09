@@ -77,8 +77,8 @@ func TestDecodingRejectsAnUnknownValueKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an unknown value kind rejected, got no error")
 	}
-	if !strings.Contains(err.Error(), "pointer") {
-		t.Fatalf("want the error to name the unknown kind, got %v", err)
+	if strings.Contains(err.Error(), "pointer") || strings.Contains(err.Error(), "0xdeadbeef") {
+		t.Fatalf("error must not echo the unknown kind or payload, got %v", err)
 	}
 }
 

@@ -40,13 +40,16 @@ const (
 	// disableEnv skips these tests without attempting to start anything.
 	disableEnv = "CRDB_TEST"
 
-	// defaultImage is pinned by digest, not only by tag. A tag such as
+	// PinnedImage is exported for exceptional topology tests which require a
+	// dedicated container rather than the process-wide single-region cluster.
+	// It is pinned by digest, not only by tag. A tag such as
 	// latest-v25.3 moves between patch releases, so integration behaviour and
 	// CI results could change with no commit in this repository. The digest
 	// makes a database upgrade a reviewed change; the tag is retained for
 	// readability.
-	defaultImage = "cockroachdb/cockroach:v25.3.7@sha256:" +
+	PinnedImage = "cockroachdb/cockroach:v25.3.7@sha256:" +
 		"2804a08ced78596780b6acde2ef203421ed5b79e371779491af49e4c9eb6aa4e"
+	defaultImage = PinnedImage
 )
 
 // shared is the process-wide container, started at most once.

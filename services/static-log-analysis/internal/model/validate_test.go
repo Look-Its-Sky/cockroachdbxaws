@@ -221,7 +221,7 @@ func TestValidateReportsStructuralViolations(t *testing.T) {
 			mutate: func(r *model.NormalizedLog) {
 				r.Attributes[" "] = model.SafeString("x")
 			},
-			field:   "attributes",
+			field:   "attributes[0]",
 			because: "an unnamed attribute cannot be matched or redacted by name",
 		},
 		{
@@ -246,6 +246,69 @@ func TestValidateReportsStructuralViolations(t *testing.T) {
 			field:   "raw_reference.region",
 			because: "raw content never leaves its region",
 		},
+		{
+			name: "raw reference without from",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.From = time.Time{}
+			},
+			field:   "raw_reference.from",
+			because: "a raw evidence range must be complete",
+		},
+		{
+			name: "raw reference without source type",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.SourceType = ""
+			},
+			field:   "raw_reference.source_type",
+			because: "raw evidence routing must use a supported source",
+		},
+		{
+			name: "raw reference with unknown source type",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.SourceType = model.SourceType("future-source")
+			},
+			field:   "raw_reference.source_type",
+			because: "unknown raw evidence routing cannot be authorized",
+		},
+		{
+			name: "raw reference with unknown classification",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.Classification = "SECRET"
+			},
+			field:   "raw_reference.classification",
+			because: "raw evidence classification is a closed authorization enum",
+		},
+		{
+			name: "raw reference without to",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.To = time.Time{}
+			},
+			field:   "raw_reference.to",
+			because: "a raw evidence range must be complete",
+		},
+		{
+			name: "raw reference with inverted range",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.From = r.RawReference.To.Add(time.Nanosecond)
+			},
+			field:   "raw_reference.to",
+			because: "a raw evidence range cannot run backward",
+		},
+		{
+			name: "raw reference expires at range end",
+			mutate: func(r *model.NormalizedLog) {
+				r.RawReference = validRawReference(r.Region)
+				r.RawReference.ExpiresAt = r.RawReference.To
+			},
+			field:   "raw_reference.expires_at",
+			because: "a raw reference must remain valid after its range ends",
+		},
 	}
 
 	for _, test := range tests {
@@ -266,6 +329,19 @@ func TestValidateReportsStructuralViolations(t *testing.T) {
 					test.field, test.because, validation.Fields())
 			}
 		})
+	}
+}
+
+func validRawReference(region string) *model.RegionalLogReference {
+	to := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	return &model.RegionalLogReference{
+		SourceType:     model.SourceTypeCloudWatch,
+		Region:         region,
+		Locator:        "safe-locator",
+		From:           to.Add(-time.Minute),
+		To:             to,
+		Classification: "SENSITIVE",
+		ExpiresAt:      to.Add(time.Hour),
 	}
 }
 
@@ -304,9 +380,9 @@ func TestValidateOrdersViolationsDeterministically(t *testing.T) {
 		}
 	}
 	want := []string{
-		"attributes[alpha].kind",
-		"attributes[mid].kind",
-		"attributes[zeta].kind",
+		"attributes[0].kind",
+		"attributes[1].kind",
+		"attributes[2].kind",
 	}
 	if !equalStrings(first, want) {
 		t.Fatalf("want violations sorted by attribute key %v, got %v", want, first)

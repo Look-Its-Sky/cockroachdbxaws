@@ -66,7 +66,7 @@ func TestSafeValueValidatesNestedValues(t *testing.T) {
 	if !asValidation(err, &validation) {
 		t.Fatalf("want *model.ValidationError, got %T", err)
 	}
-	if !validation.Has("map[outer].slice[0].map[inner].withheld") {
+	if !validation.Has("map[0].slice[0].map[0].withheld") {
 		t.Fatalf("want the violation to name its full path, got %v", validation.Fields())
 	}
 }
