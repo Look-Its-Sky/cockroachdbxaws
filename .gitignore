@@ -9,3 +9,9 @@
 *.swp
 
 .env
+
+# Terraform local state and provider cache. Lock files remain versioned.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log

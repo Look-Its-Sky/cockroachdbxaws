@@ -264,3 +264,34 @@ development conveniences only.
 Do not deploy separate `ingest`, `source`, and `process` replicas until the
 non-shared journal handoff described in acceptance.md is resolved. Otherwise an
 ingest/source replica can acknowledge work that no process replica owns.
+
+## Production EKS package
+
+The production deployment package now lives beside the service rather than in
+a repository-global deployment folder:
+
+```text
+services/static-log-analysis/
+├── chart/static-log-analysis/  Helm chart and production values example
+└── infra/aws/                  regional SQS and EKS Pod Identity module
+```
+
+The chart implements the reviewed `Collector -> all -> CockroachDB -> outbox ->
+SQS` topology. Both the Collector and analysis StatefulSets receive distinct
+`ReadWriteOnce` PVCs. OTLP is mutual TLS on both hops, the Collector's universal
+redaction precedes its persistent queue, migrations run before install and
+upgrade, and only the outbox service account receives permission to send SQS
+messages.
+
+See [the chart runbook](../../services/static-log-analysis/chart/static-log-analysis/README.md)
+for secrets, installation, project connection, and verification. See [the AWS
+module](../../services/static-log-analysis/infra/aws/README.md) for the regional
+queues and Pod Identity wiring.
+
+This package intentionally consumes, but does not create, the provider-managed
+CockroachDB cluster. Supply its TLS DSN through the existing Kubernetes Secret.
+It intentionally omits the source-only role. Production CloudWatch pull is the
+optional combined `cloudwatch` StatefulSet: its poller and processor own the
+same journal, while a separate checkpoint PVC retains the retrieval cursor.
+The AWS module grants its service account only `logs:FilterLogEvents` on the
+exact configured regional log groups.

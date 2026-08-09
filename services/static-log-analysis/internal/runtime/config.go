@@ -56,6 +56,10 @@ const (
 	RoleIngest  Role = "ingest"
 	RoleProcess Role = "process"
 	RoleOutbox  Role = "outbox"
+	// RoleCloudWatch combines a pull adapter and a process worker in the same
+	// replica. Both operate on the replica's one non-shared journal, so a record
+	// acknowledged by the puller always has a processor that owns its volume.
+	RoleCloudWatch Role = "cloudwatch"
 	// RoleSource pulls from a source that does not push to us. It is
 	// deliberately not part of RoleAll: a source needs log groups configured,
 	// and folding it into the default role would make every replica require
@@ -63,14 +67,16 @@ const (
 	RoleSource Role = "source"
 )
 
-func (r Role) Ingests() bool   { return r == RoleAll || r == RoleIngest }
-func (r Role) Processes() bool { return r == RoleAll || r == RoleProcess }
+func (r Role) Ingests() bool { return r == RoleAll || r == RoleIngest }
+func (r Role) Processes() bool {
+	return r == RoleAll || r == RoleProcess || r == RoleCloudWatch
+}
 func (r Role) Publishes() bool { return r == RoleOutbox }
 
 // Polls reports whether this role pulls from a source adapter. Such a replica
 // opens a journal and writes to it, exactly as an ingest replica does, but binds
 // no listener: nothing pushes to it.
-func (r Role) Polls() bool { return r == RoleSource }
+func (r Role) Polls() bool { return r == RoleSource || r == RoleCloudWatch }
 
 // WritesJournal reports whether this role owns a journal volume. Both the push
 // and the pull ingestion paths do, and so does the combined role.
@@ -78,7 +84,7 @@ func (r Role) WritesJournal() bool { return r.Ingests() || r.Processes() || r.Po
 
 func (r Role) valid() bool {
 	switch r {
-	case RoleAll, RoleIngest, RoleProcess, RoleOutbox, RoleSource:
+	case RoleAll, RoleIngest, RoleProcess, RoleOutbox, RoleSource, RoleCloudWatch:
 		return true
 	default:
 		return false
@@ -232,8 +238,8 @@ type Config struct {
 // is positional so `log-analysis ingest` reads the way ADR 0001 writes it.
 func Parse(args []string, getenv func(string) string, output io.Writer) (Config, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return Config{}, fmt.Errorf("%w: first argument must be a role: %s, %s, %s, %s, or %s",
-			ErrInvalidConfig, RoleAll, RoleIngest, RoleProcess, RoleOutbox, RoleSource)
+		return Config{}, fmt.Errorf("%w: first argument must be a role: %s, %s, %s, %s, %s, or %s",
+			ErrInvalidConfig, RoleAll, RoleIngest, RoleProcess, RoleOutbox, RoleSource, RoleCloudWatch)
 	}
 	config := Config{Role: Role(args[0])}
 	if !config.Role.valid() {
@@ -859,6 +865,10 @@ func (c Config) Describe() string {
 	}
 	if c.Role.Processes() {
 		fields = append(fields, fmt.Sprintf("process_cohort=%d", c.Worker.Cohort), "process_interval="+c.Worker.Interval.String())
+	}
+	if c.Role.Polls() {
+		fields = append(fields, "cloudwatch_account="+c.Source.Account,
+			fmt.Sprintf("cloudwatch_groups=%d", len(c.Source.Groups)), "checkpoint_dir="+c.Source.CheckpointDir)
 	}
 	return strings.Join(fields, " ")
 }

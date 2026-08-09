@@ -103,10 +103,12 @@ Landed so far:
   fault, verified against a real SQS API in LocalStack. The `outbox` role now
   runs end to end: real journal, real CockroachDB, real publisher, real queue.
 
-- `pipeline.IngestRecords`, `internal/cloudwatch/cwsink`, and the `source` role:
+- `pipeline.IngestRecords`, `internal/cloudwatch/cwsink`, and the combined
+  `cloudwatch` role:
   the second ingestion entry point, which keeps the native CloudWatch event ID
   `cw:v1` is defined over instead of discarding it the way an OTLP-bytes entry
-  point would. Verified end to end from a command line into a real journal.
+  point would. Verified end to end from a command line through a real journal
+  into real CockroachDB. The source-only role remains a diagnostic surface.
   Contract: `cloudwatch-source.md`.
 - Fuzz targets for redaction and OTLP decoding, with a nightly gate.
 - `internal/enrich`: non-blocking deployment enrichment with a bounded cache,

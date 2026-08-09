@@ -45,6 +45,9 @@ jobs:
         # by the gate that is supposed to be checking it.
         run: go test ./...
 
+      - name: Validate production deployment package
+        run: ./scripts/check-production-deployment.sh
+
       - name: Check that nothing was regenerated
         # Catches a golden fixture or generated file that was changed by the
         # test run but not committed.

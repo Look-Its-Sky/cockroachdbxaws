@@ -28,7 +28,8 @@ so this table cannot silently degrade into skipped tests.
 ## 1. Receive or retrieve logs from multiple deployed services — DEMONSTRATED
 
 Both paths are demonstrated end to end. OTLP push runs on both transports, and
-the `source` role retrieves from a real CloudWatch Logs API into a real journal
+the combined `cloudwatch` role retrieves from a real CloudWatch Logs API into
+its real journal and processes that same journal into CockroachDB
 with no double anywhere in the path.
 
 | Evidence | Gate |
@@ -52,6 +53,7 @@ Additional evidence:
 | `pipeline.TestIngestRecordsRejectsAnOversizedRecordWithoutLosingItsSiblings` | fast |
 | `cwsink.TestAnUnacknowledgedResultIsNeverUpgraded` | fast |
 | `runtime.TestTheSourceRoleReadsARealLogGroupIntoItsJournal` | integration |
+| `runtime.TestTheCombinedCloudWatchRolePullsAndPersists` | integration |
 | `runtime.TestASourceReplicaParsesItsGroupsWithTheIdentityTheOperatorDeclared` | fast |
 
 ## 2. Normalize them into the versioned canonical form — DEMONSTRATED
@@ -241,6 +243,7 @@ tdd-plan.md lists seven. Status:
 | Fast unit/fixture/property on every change | `static-log-analysis.yml` → `fast` |
 | Integration with race detector | `static-log-analysis.yml` → `integration` |
 | Schema generation and compatibility | `scripts/check-generated-proto.sh` in `fast` |
+| Production deployment package | `scripts/check-production-deployment.sh` in `fast`; Helm lint/render plus Terraform format/init/validate |
 | Migration apply and compatibility | implicit — every integration test applies migrations; no dedicated gate |
 | Redaction regression corpus | fuzz seed corpora run in `fast`; nightly fuzz in `static-log-analysis-nightly.yml` |
 | End-to-end vertical slice on affected pull requests | runs in `integration` on every pull request, not path-filtered |
@@ -291,7 +294,8 @@ architecture.md before either is built.
 
 Done since this document was created: the SQS Standard transport (acceptance 7),
 the fuzz targets and their nightly gate (acceptance 2 and 10), the runbooks in
-runbooks.md, the CloudWatch ingestion path and the `source` role that drives it
+runbooks.md, the CloudWatch ingestion path and the combined `cloudwatch` role
+that safely polls and processes one owned journal
 (acceptance 1), enrichment (acceptance 5), the CockroachDB outage scenario
 (acceptance 9, scenarios 1–3), capacity shedding wired to a live journal
 (scenario 9), replica drain (scenario 11's drain half), the admin health,
@@ -301,3 +305,6 @@ ingress network and overlay renderer, an OTLP-to-SQS deployment smoke script,
 and the measured deterministic `derived:v1` compatibility path for producers
 without a native UUIDv7. The OpenTelemetry Demo Collector is wired through that
 generic ingress contract, but the specific Flagd scenarios remain outstanding.
+The service-local production EKS chart and regional AWS Terraform module are
+also validated in the fast gate; they preserve the safe `all` topology and do
+not enable the unresolved split-role path.

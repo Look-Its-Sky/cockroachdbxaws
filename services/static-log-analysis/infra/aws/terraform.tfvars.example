@@ -1,0 +1,23 @@
+region               = "us-east-1"
+eks_cluster_name     = "application-production"
+kubernetes_namespace = "static-log-analysis"
+
+tags = {
+  Environment = "production"
+  Project     = "application"
+}
+
+cloudwatch_sources = {
+  api = {
+    log_group_arn  = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/ecs/application/api"
+    log_group_name = "/aws/ecs/application/api"
+    service        = "api"
+    environment    = "production"
+  }
+  worker = {
+    log_group_arn  = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/ecs/application/worker"
+    log_group_name = "/aws/ecs/application/worker"
+    service        = "worker"
+    environment    = "production"
+  }
+}

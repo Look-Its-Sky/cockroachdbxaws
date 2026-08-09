@@ -24,6 +24,7 @@ import (
 
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/agent"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/clock"
+	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/cloudwatch"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/journal"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/outbox"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/persistence"
@@ -70,6 +71,23 @@ func (j *foreignManifestJournal) Manifest() journal.Manifest {
 	manifest := j.Journal.Manifest()
 	manifest.Region = "eu-central-1"
 	return manifest
+}
+
+type countingJournal struct {
+	runtime.Journal
+	claims atomic.Int64
+}
+
+func (j *countingJournal) Claim(limit int, owner string) ([]journal.ClaimedRecord, error) {
+	j.claims.Add(1)
+	return j.Journal.Claim(limit, owner)
+}
+
+type countingSource struct{ polls atomic.Int64 }
+
+func (s *countingSource) Poll(context.Context) (cloudwatch.PollResult, error) {
+	s.polls.Add(1)
+	return cloudwatch.PollResult{}, nil
 }
 
 func serverArgs(t *testing.T, role string, overrides ...string) []string {
@@ -237,6 +255,62 @@ func mustParse(t *testing.T, args []string) runtime.Config {
 		t.Fatal(err)
 	}
 	return config
+}
+
+func cloudWatchServerArgs(t *testing.T) []string {
+	t.Helper()
+	return []string{"cloudwatch",
+		"-region=" + otlpgen.DefaultRegion, "-tenant-id=tenant-a", "-classification=SENSITIVE",
+		"-journal-dir=" + filepath.Join(t.TempDir(), "journal"), "-journal-max-bytes=67108864",
+		"-cloudwatch-account=000000000000",
+		"-cloudwatch-log-groups=/aws/ecs/payments=" + otlpgen.DefaultService + "=" + otlpgen.DefaultEnvironment,
+		"-cloudwatch-source-instance=cw-adapter-a", "-cloudwatch-credential-identity=workload-a",
+		"-cloudwatch-checkpoint-dir=" + filepath.Join(t.TempDir(), "checkpoints"),
+		"-cloudwatch-interval=10ms", "-cloudwatch-idle-interval=10ms",
+		"-cloudwatch-backoff-min=10ms", "-cloudwatch-backoff-max=20ms",
+		"-process-interval=10ms", "-process-idle-interval=10ms",
+		"-process-backoff-min=10ms", "-process-backoff-max=20ms",
+		"-admin-listen=127.0.0.1:0",
+	}
+}
+
+func TestCloudWatchRoleRunsPollingAndProcessingAgainstTheSameJournal(t *testing.T) {
+	deps := testDeps(t)
+	var ownedJournal *countingJournal
+	deps.OpenJournal = func(config runtime.Config, policy *redact.Policy) (runtime.Journal, error) {
+		real, err := runtime.OpenJournal(config, policy, deps.Clock)
+		if err != nil {
+			return nil, err
+		}
+		ownedJournal = &countingJournal{Journal: real}
+		return ownedJournal, nil
+	}
+	source := &countingSource{}
+	deps.OpenSource = func(context.Context, runtime.Config, *redact.Policy, runtime.Deps, *pipeline.Service) (runtime.Source, func(), error) {
+		return source, func() {}, nil
+	}
+
+	server, err := runtime.Start(context.Background(), mustParse(t, cloudWatchServerArgs(t)), deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopServer(t, server)
+
+	if server.GRPCAddr() != "" || server.HTTPAddr() != "" {
+		t.Fatalf("cloudwatch role opened OTLP listeners %q and %q", server.GRPCAddr(), server.HTTPAddr())
+	}
+	waitFor(t, "the CloudWatch poller to run", func() bool { return source.polls.Load() > 0 })
+	waitFor(t, "the processor to claim from the same journal", func() bool { return ownedJournal.claims.Load() > 0 })
+	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Drain(drainCtx); err != nil {
+		t.Fatalf("drain combined CloudWatch role: %v", err)
+	}
+	pollsAfterDrain := source.polls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := source.polls.Load(); got != pollsAfterDrain {
+		t.Fatalf("CloudWatch poller continued after drain: polls %d -> %d", pollsAfterDrain, got)
+	}
 }
 
 // This replaces TestOutboxRoleRefusesToStartRatherThanPublishNothing, which

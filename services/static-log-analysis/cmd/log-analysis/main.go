@@ -6,6 +6,7 @@
 //	log-analysis process
 //	log-analysis outbox
 //	log-analysis source
+//	log-analysis cloudwatch
 //
 // Everything this command does is glue. Configuration, role selection, the OTLP
 // acknowledgement boundary, the process cadence, and shutdown ordering all live

@@ -1,0 +1,65 @@
+region: us-east-1
+tenantID: application-production
+allowedServices:
+  - api
+  - worker
+allowedEnvironments:
+  - production
+
+image:
+  repository: 111122223333.dkr.ecr.us-east-1.amazonaws.com/static-log-analysis
+  tag: v0.1.0
+  # Set this to the digest returned by ECR before deployment.
+  digest: ""
+
+database:
+  existingSecret: static-log-analysis-database
+  dsnKey: dsn
+
+tls:
+  analysisServerSecret: static-log-analysis-server-tls
+  collectorServerSecret: static-log-analysis-collector-server-tls
+  collectorClientSecret: static-log-analysis-collector-client-tls
+  # Must be present in the analysis server certificate's DNS SAN. Empty means
+  # the generated analysis Service name (static-log-analysis for the documented
+  # release command).
+  analysisServerName: ""
+
+analysis:
+  journal:
+    storageClass: gp3
+    size: 20Gi
+    maxBytes: 16106127360
+    minFreeBytes: 2147483648
+
+collector:
+  queue:
+    storageClass: gp3
+    size: 10Gi
+
+# Populate these from `terraform output -raw` in infra/aws.
+outbox:
+  queueURL: https://sqs.us-east-1.amazonaws.com/111122223333/static-log-analysis
+  deadLetterQueueURL: https://sqs.us-east-1.amazonaws.com/111122223333/static-log-analysis-dlq
+
+# Optional pull path. The same source map must be supplied to infra/aws so its
+# IAM role grants FilterLogEvents on exactly these groups.
+cloudwatch:
+  enabled: true
+  accountID: "111122223333"
+  credentialIdentity: arn:aws:iam::111122223333:role/static-log-analysis-cloudwatch
+  sources:
+    - logGroup: /aws/ecs/application/api
+      service: api
+      environment: production
+    - logGroup: /aws/ecs/application/worker
+      service: worker
+      environment: production
+  journal:
+    storageClass: gp3
+    size: 20Gi
+    maxBytes: 16106127360
+    minFreeBytes: 2147483648
+  checkpoints:
+    storageClass: gp3
+    size: 1Gi

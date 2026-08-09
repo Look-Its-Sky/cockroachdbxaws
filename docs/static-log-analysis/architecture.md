@@ -86,10 +86,13 @@ log-analysis all
 log-analysis ingest
 log-analysis process
 log-analysis outbox
+log-analysis cloudwatch
 ```
 
-Local deployments run `all`. Production may scale roles separately using the
-same artifact. Internal packages must preserve boundaries between ingestion,
+Local OTLP deployments run `all`. The production CloudWatch pull role combines
+polling and processing in the replica that owns its journal. Split `ingest` and
+`process` deployment remains unsupported until a non-shared volume handoff is
+defined. Internal packages must preserve boundaries between ingestion,
 redaction, journal, normalization, rules, incidents, enrichment, persistence,
 outbox, queue, and telemetry.
 

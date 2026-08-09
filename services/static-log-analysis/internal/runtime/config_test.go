@@ -60,7 +60,7 @@ func TestParseAcceptsEveryDocumentedRole(t *testing.T) {
 	// Each role is given the environment it is entitled to. A role that opens no
 	// database is refused a database credential, so handing one to every role
 	// here would be testing a configuration an operator is not allowed to make.
-	for _, role := range []string{"all", "ingest", "process", "outbox", "source"} {
+	for _, role := range []string{"all", "ingest", "process", "outbox", "source", "cloudwatch"} {
 		dsn := validDSN
 		args := validArgs(role)
 		if role == "ingest" {
@@ -71,6 +71,9 @@ func TestParseAcceptsEveryDocumentedRole(t *testing.T) {
 			// credential, so it needs its own complete configuration.
 			dsn, args = "", sourceArgs(t)
 		}
+		if role == "cloudwatch" {
+			args = cloudWatchArgs(t)
+		}
 		config, err := parse(t, args, env(dsn))
 		if err != nil {
 			t.Fatalf("role %q: %v", role, err)
@@ -78,6 +81,28 @@ func TestParseAcceptsEveryDocumentedRole(t *testing.T) {
 		if string(config.Role) != role {
 			t.Fatalf("role %q parsed as %q", role, config.Role)
 		}
+	}
+}
+
+func TestCloudWatchRoleCombinesPollingAndProcessingWithoutOpeningIngress(t *testing.T) {
+	config, err := parse(t, cloudWatchArgs(t), env(validDSN))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.Role.Polls() || !config.Role.Processes() {
+		t.Fatalf("cloudwatch role traits: polls=%v processes=%v", config.Role.Polls(), config.Role.Processes())
+	}
+	if config.Role.Ingests() || config.Role.Publishes() {
+		t.Fatalf("cloudwatch role unexpectedly listens or publishes: ingests=%v publishes=%v", config.Role.Ingests(), config.Role.Publishes())
+	}
+	if _, err := parse(t, cloudWatchArgs(t), env("")); !errors.Is(err, runtime.ErrInvalidConfig) {
+		t.Fatalf("cloudwatch role started without the database needed to drain its journal: %v", err)
+	}
+}
+
+func TestSourceOnlyRoleStillRefusesADatabaseCredential(t *testing.T) {
+	if _, err := parse(t, sourceArgs(t), env(validDSN)); !errors.Is(err, runtime.ErrInvalidConfig) {
+		t.Fatalf("source-only role accepted a database credential it cannot use: %v", err)
 	}
 }
 
@@ -452,6 +477,13 @@ func sourceArgs(t *testing.T, overrides ...string) []string {
 		"-cloudwatch-credential-identity=workload-a",
 		"-cloudwatch-checkpoint-dir=" + t.TempDir(),
 	}
+	return append(args, overrides...)
+}
+
+func cloudWatchArgs(t *testing.T, overrides ...string) []string {
+	t.Helper()
+	args := sourceArgs(t)
+	args[0] = "cloudwatch"
 	return append(args, overrides...)
 }
 

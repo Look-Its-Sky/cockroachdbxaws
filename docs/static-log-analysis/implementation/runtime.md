@@ -11,6 +11,7 @@ log-analysis ingest
 log-analysis process
 log-analysis outbox
 log-analysis source
+log-analysis cloudwatch
 ```
 
 | Role | Opens | Listens | Holds a database credential |
@@ -20,15 +21,20 @@ log-analysis source
 | `process` | journal, database, worker | no | yes |
 | `outbox` | database, queue client, worker | no | yes |
 | `source` | journal, checkpoints, source client, worker | no | no |
+| `cloudwatch` | journal, checkpoints, source client, database, poll worker, process worker | no | yes |
 
-`source` is the pull-based ingestion path. It writes to a journal exactly as
-`ingest` does but binds no listener, because nothing pushes to it. It is
-deliberately **not** part of `all`: a source replica needs log groups
-configured, and folding it in would make every replica require CloudWatch
+`source` is the source-only diagnostic path. It writes to a journal exactly as
+`ingest` does but binds no listener, because nothing pushes to it. CloudWatch is
+deliberately **not** part of `all`: a polling replica needs log groups
+configured, and folding it in would make every OTLP replica require CloudWatch
 configuration it does not use. Its contract is cloudwatch-source.md.
 
-A `source` replica holds no database credential, for the same reason `ingest`
-does not.
+The production pull path is `cloudwatch`, not `source`. It polls and processes
+against the same non-shared journal, so every record durably accepted from
+CloudWatch has a processor that owns its volume. It therefore holds the database
+credential its process worker needs. The source-only role remains a diagnostic
+and adapter test surface; it holds no database credential and MUST NOT be used
+as a production topology because nothing in that replica drains its journal.
 
 The container image also carries the one-shot `log-analysis-migrate` deployment
 utility. It is not a service role: an init job runs it before application
@@ -271,7 +277,7 @@ A drain cannot finish faster than the records in the journal can finalize: a
 record inside its allowed-lateness window is held, not stuck. Budget accordingly.
 
 A role that runs no process worker **refuses to drain** rather than looping until
-its deadline. Nothing in an `ingest` or `source` replica can turn its journal
+its deadline. Nothing in an `ingest` or source-only replica can turn its journal
 into committed rows, and reporting a timeout would suggest slowness rather than
 impossibility. See the open question in acceptance.md about how such a replica's
 journal is drained at all.
@@ -521,10 +527,9 @@ role is now reachable end to end: `openTransport` builds `internal/outbox/sqsaws
 whose classification of every SQS failure into retryable, message-rejected, and
 deployment-fault is verified against a real SQS API.
 
-`internal/cloudwatch` is complete within its own boundary but is still wired to
-nothing: no role runs it and its `Sink` has no implementation. See
-cloudwatch-source.md, which is cited as normative by that package and has not
-been written.
+`internal/cloudwatch` is driven in production by the combined `cloudwatch` role.
+The poll worker and process worker share one coordinator and one journal; the
+source-only role is retained for bounded adapter diagnostics and tests.
 
 Still genuinely absent: Collector persistent-queue configuration, capacity
 shedding wired to live journal utilization, the metrics and audit-event

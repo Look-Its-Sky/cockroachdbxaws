@@ -1,0 +1,7 @@
+apiVersion: v2
+name: static-log-analysis
+description: Regional deterministic log analysis and agent assignment service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+

@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "static-log-analysis.fullname" . }}-collector
+  labels:
+    {{- include "static-log-analysis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+data:
+  config.yaml: |
+    extensions:
+      file_storage/queue:
+        directory: /var/lib/otelcol/queue
+        compaction:
+          on_start: true
+          directory: /var/lib/otelcol/queue
+          max_transaction_size: 65536
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            tls:
+              cert_file: /tls/server/tls.crt
+              key_file: /tls/server/tls.key
+              client_ca_file: /tls/server/ca.crt
+          http:
+            endpoint: 0.0.0.0:4318
+            tls:
+              cert_file: /tls/server/tls.crt
+              key_file: /tls/server/tls.key
+              client_ca_file: /tls/server/ca.crt
+
+    processors:
+      filter/drop-collector-self-telemetry:
+        error_mode: ignore
+        logs:
+          log_record:
+            - 'resource.attributes["service.name"] == "otelcol-contrib"'
+
+      # This universal pass must remain before the exporter and its disk queue.
+      attributes/strip-credentials:
+        actions:
+          - {key: http.request.header.authorization, action: delete}
+          - {key: http.request.header.proxy-authorization, action: delete}
+          - {key: http.request.header.cookie, action: delete}
+          - {key: http.response.header.set-cookie, action: delete}
+          - {key: http.request.header.x-api-key, action: delete}
+          - {key: aws.secret.access.key, action: delete}
+          - {key: password, action: delete}
+          - {key: passwd, action: delete}
+          - {key: secret, action: delete}
+          - {key: api_key, action: delete}
+          - {key: apikey, action: delete}
+          - {key: token, action: delete}
+          - {key: authorization, action: delete}
+
+      transform/strip-secrets:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - replace_pattern(body.string, "(?i)(bearer|basic)\\s+[A-Za-z0-9._~+/=-]+", "$$1 [REDACTED_AUTHORIZATION]")
+              - replace_pattern(body.string, "eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}", "[REDACTED_JWT]")
+              - replace_pattern(body.string, "(AKIA|ASIA)[0-9A-Z]{16}", "[REDACTED_AWS_ACCESS_KEY_ID]")
+              - replace_pattern(body.string, "(?i)([a-z0-9+.-]+://[^:/@\\s]+):[^@\\s]+@", "$$1:[REDACTED_PASSWORD]@")
+              - replace_pattern(body.string, "(?i)\\b(password|passwd|secret|api[_-]?key|token)\\b\\s*[=:]\\s*\\S+", "$$1=[REDACTED]")
+              - replace_pattern(body.string, "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]")
+
+      batch:
+        send_batch_size: 512
+        send_batch_max_size: 1024
+        timeout: 5s
+
+    exporters:
+      otlp/analysis:
+        endpoint: {{ include "static-log-analysis.fullname" . }}:4317
+        compression: gzip
+        tls:
+          ca_file: /tls/client/ca.crt
+          cert_file: /tls/client/tls.crt
+          key_file: /tls/client/tls.key
+          server_name_override: {{ include "static-log-analysis.analysisServerName" . }}
+        sending_queue:
+          enabled: true
+          storage: file_storage/queue
+          num_consumers: 4
+          queue_size: {{ .Values.collector.queue.sizeRecords }}
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 0
+
+    service:
+      extensions: [file_storage/queue]
+      pipelines:
+        logs/static_log_analysis:
+          receivers: [otlp]
+          processors: [filter/drop-collector-self-telemetry, attributes/strip-credentials, transform/strip-secrets, batch]
+          exporters: [otlp/analysis]
+      telemetry:
+        logs:
+          level: info

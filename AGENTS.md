@@ -43,9 +43,10 @@ the native CloudWatch event ID `cw:v1` is defined over; fuzz targets for
 redaction and OTLP decoding with a nightly gate; and the normative
 `cloudwatch-source.md`.
 
-There is now a `source` role. `log-analysis source` drives the CloudWatch
-adapter into the journal, verified end to end against a real CloudWatch Logs
-API. It binds no listener and holds no database credential.
+The source-only role drives the CloudWatch adapter into a journal for bounded
+diagnostics and adapter testing. Production uses `log-analysis cloudwatch`,
+which binds no listener and runs both the poll and process workers against its
+one journal.
 
 The service now has a non-root production image, a reviewed one-shot migration
 utility, and a self-contained local Compose deployment for CockroachDB,
@@ -71,6 +72,19 @@ journal, `internal/outage` (the CockroachDB outage scenario, network severed
 rather than container stopped), replica drain, the admin health/readiness/
 metrics listener, and `deploy/collector/` with the first-pass redaction
 security.md requires before the Collector's persistent queue.
+
+The service-local production package is now present: `chart/static-log-analysis`
+installs the mTLS Collector gateway, combined `all` StatefulSet, migration Job,
+and outbox Deployment on EKS; `infra/aws` creates the regional encrypted SQS
+queues and least-privilege EKS Pod Identity roles. The fast CI gate lints and
+renders the chart and validates the Terraform module. It consumes rather than
+creates the provider-managed CockroachDB cluster.
+
+The production CloudWatch pull path is the combined `cloudwatch` role. Its poll
+and process workers share one journal, it retains checkpoints on a second
+volume, and the chart deploys it as an optional single-replica StatefulSet.
+`infra/aws` creates its exact-log-group `logs:FilterLogEvents` Pod Identity.
+The source-only role remains a diagnostic surface and is not deployed.
 
 Missing: a real enrichment provider and late-answer context versioning, the
 audit-event subsystem, rule reload, an operator-facing suppress/reopen API, and

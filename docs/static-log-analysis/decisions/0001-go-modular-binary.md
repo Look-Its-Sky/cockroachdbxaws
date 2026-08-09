@@ -5,8 +5,10 @@ Status: accepted
 ## Decision
 
 Implement the first release in Go 1.26 as one binary supporting `all`, `ingest`,
-`process`, and `outbox` roles. Use OTLP Protobuf, explicit internal domain types,
-`pgx/v5`, versioned SQL migrations, and standard-library HTTP where practical.
+`process`, `outbox`, and combined `cloudwatch` roles. The source-only role is a
+diagnostic surface, not a production topology. Use OTLP Protobuf, explicit
+internal domain types, `pgx/v5`, versioned SQL migrations, and standard-library
+HTTP where practical.
 
 ## Rationale
 

@@ -135,6 +135,7 @@ type Server struct {
 	journal        Journal
 	receiver       *otlpreceiver.Receiver
 	worker         *worker
+	sourceWorker   *worker
 	closeDB        func()
 	closeTransport func()
 	closeSource    func()
@@ -236,7 +237,12 @@ func Start(ctx context.Context, config Config, deps Deps) (*Server, error) {
 			return nil, err
 		}
 		server.closeSource = closeSource
-		server.worker = newPollWorker(source, config.Source.Cadence, deps.Clock, deps.Logger)
+		pollWorker := newPollWorker(source, config.Source.Cadence, deps.Clock, deps.Logger)
+		if config.Role.Processes() {
+			server.sourceWorker = pollWorker
+		} else {
+			server.worker = pollWorker
+		}
 	}
 	server.service = service
 	if err := server.startAdmin(config); err != nil {
@@ -249,6 +255,9 @@ func Start(ctx context.Context, config Config, deps Deps) (*Server, error) {
 	// racing those closes.
 	if server.worker != nil {
 		server.worker.start()
+	}
+	if server.sourceWorker != nil {
+		server.sourceWorker.start()
 	}
 	deps.Logger.Info("static-log-analysis started", slog.String("config", config.Describe()),
 		slog.String("otlp_grpc_addr", server.GRPCAddr()), slog.String("otlp_http_addr", server.HTTPAddr()))
@@ -405,6 +414,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if s.receiver != nil {
 			if err := s.receiver.Shutdown(ctx); err != nil {
 				errs = append(errs, fmt.Errorf("runtime: drain receiver: %w", err))
+			}
+		}
+		if s.sourceWorker != nil {
+			// Stop creating journal work before stopping the worker that drains
+			// it. Anything already synchronized may remain for the next start.
+			if err := s.sourceWorker.stopAndWait(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("runtime: stop %s worker: %w", s.sourceWorker.name, err))
 			}
 		}
 		if s.worker != nil {
@@ -872,8 +888,8 @@ func (s *Server) Drain(ctx context.Context) error {
 	if s.receiver != nil {
 		_ = s.receiver.Shutdown(ctx)
 	}
-	if s.worker != nil && s.config.Role.Polls() {
-		_ = s.worker.stopAndWait(ctx)
+	if s.sourceWorker != nil {
+		_ = s.sourceWorker.stopAndWait(ctx)
 	}
 
 	for {

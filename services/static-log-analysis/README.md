@@ -280,9 +280,12 @@ Production must also replace LocalStack with regional Amazon SQS, plaintext
 region-local persistent storage. Do not expose the local Compose deployment as
 a production security model.
 
-This repository currently provides the image and runtime configuration
-contract, not an ECS, Kubernetes, or Terraform module. A platform-specific
-deployment should be added once the target runtime is selected.
+The production EKS package is in
+[`chart/static-log-analysis`](chart/static-log-analysis/README.md). Regional
+SQS queues and EKS Pod Identity wiring are in
+[`infra/aws`](infra/aws/README.md). The package intentionally consumes an
+existing EKS cluster, storage class, provider-managed CockroachDB TLS DSN, and
+certificate secrets; it does not take ownership of those platform resources.
 
 ## Tests
 
@@ -293,6 +296,7 @@ gofmt -l .
 go vet ./...
 go vet -tags=integration ./...
 ./scripts/check-generated-proto.sh
+./scripts/check-production-deployment.sh
 go test ./...
 REQUIRE_DOCKER=1 go test -p 1 -race -tags=integration ./...
 ```

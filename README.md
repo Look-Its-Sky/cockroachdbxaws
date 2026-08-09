@@ -11,6 +11,8 @@ services/    deployable components, one Go module each
 
 - [Static Log Analysis Service documentation](docs/static-log-analysis/README.md)
 - [Static Log Analysis Service code](services/static-log-analysis/)
+- [Production EKS chart](services/static-log-analysis/chart/static-log-analysis/README.md)
+- [Regional AWS infrastructure module](services/static-log-analysis/infra/aws/README.md)
 - [Working in this repository](AGENTS.md) — current progress, gates, and conventions
 
 The service is under construction. [AGENTS.md](AGENTS.md) records which
@@ -22,5 +24,6 @@ the intended system and its contracts.
 ```text
 cd services/static-log-analysis
 go test ./...                                          # fast gate
-REQUIRE_DOCKER=1 go test -race -tags=integration ./...  # storage and concurrency gate
+./scripts/check-production-deployment.sh               # Helm and Terraform gate
+REQUIRE_DOCKER=1 go test -p 1 -race -tags=integration ./...  # storage and concurrency gate
 ```

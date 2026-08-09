@@ -15,7 +15,9 @@ import (
 	cwltypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/clock"
+	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/persistence"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/runtime"
+	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/testsupport/crdbtest"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/testsupport/localstacktest"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/testsupport/testids"
 )
@@ -26,6 +28,78 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Logf("%s", p)
 	return len(p), nil
+}
+
+// TestTheCombinedCloudWatchRolePullsAndPersists proves the production role's
+// ownership invariant with both real storage boundaries: the poller appends to
+// the journal this same replica processes into CockroachDB. A source-only test
+// cannot prove that acknowledged work is ever drained.
+func TestTheCombinedCloudWatchRolePullsAndPersists(t *testing.T) {
+	ctx := context.Background()
+	pool := crdbtest.Pool(t)
+	if err := persistence.ApplyMigrations(ctx, pool, persistence.TopologySingleRegion); err != nil {
+		t.Fatal(err)
+	}
+	admin := localstacktest.Admin(t)
+	group := localstacktest.LogGroup(t, admin)
+	const stream = "ecs/paymentservice/cloudwatch-combined"
+	localstacktest.LogStream(t, admin, group, stream)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+	settled := time.Now().UTC().Add(-5 * time.Minute)
+	if _, err := admin.PutLogEvents(ctx, &cloudwatchlogs.PutLogEventsInput{
+		LogGroupName: awssdk.String(group), LogStreamName: awssdk.String(stream),
+		LogEvents: []cwltypes.InputLogEvent{{
+			Timestamp: awssdk.Int64(settled.UnixMilli()),
+			Message:   awssdk.String(`{"level":"ERROR","message":"combined role failure"}`),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"cloudwatch",
+		"-region=" + localstacktest.Region, "-tenant-id=tenant-a", "-classification=SENSITIVE",
+		"-journal-dir=" + filepath.Join(t.TempDir(), "journal"), "-journal-max-bytes=67108864",
+		"-cloudwatch-account=" + localstacktest.Account,
+		"-cloudwatch-log-groups=" + group + "=paymentservice=production",
+		"-cloudwatch-source-instance=cw-combined-a", "-cloudwatch-credential-identity=workload-a",
+		"-cloudwatch-checkpoint-dir=" + filepath.Join(t.TempDir(), "checkpoints"),
+		"-cloudwatch-endpoint-url=" + localstacktest.Endpoint(t),
+		"-cloudwatch-interval=20ms", "-cloudwatch-idle-interval=20ms",
+		"-cloudwatch-backoff-min=20ms", "-cloudwatch-backoff-max=40ms",
+		"-process-interval=20ms", "-process-idle-interval=20ms",
+		"-process-backoff-min=20ms", "-process-backoff-max=40ms",
+		"-admin-listen=127.0.0.1:0",
+	}
+	config, err := runtime.Parse(args, func(name string) string {
+		if name == runtime.DatabaseDSNEnvVar {
+			return pool.Config().ConnString()
+		}
+		return ""
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := runtime.Start(ctx, config, runtime.Deps{Clock: clock.System(), IDs: testids.New(),
+		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	})
+
+	waitForOccurrences(t, ctx, pool, 1)
+	stats, err := server.JournalStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Committed < 1 {
+		t.Fatalf("CloudWatch record reached CockroachDB without a committed journal transition: %+v", stats)
+	}
 }
 
 // TestTheSourceRoleReadsARealLogGroupIntoItsJournal is the end-to-end evidence

@@ -55,8 +55,8 @@ and similar historical incidents.
 ## Agreed baseline
 
 - Go 1.26 and OTLP/Protobuf.
-- One modular binary with independently runnable ingestion, processing, and
-  outbox roles.
+- One modular binary with OTLP, processing, outbox, and combined CloudWatch
+  polling-and-processing roles.
 - At-least-once delivery with effectively-once record contribution.
 - A short OpenTelemetry Collector persistent transport queue.
 - An authoritative, redacted, disk-backed journal in the analysis service.

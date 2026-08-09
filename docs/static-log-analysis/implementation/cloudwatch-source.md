@@ -151,21 +151,25 @@ become a time series that never retires.
 
 ## The role that runs it
 
-`log-analysis source` drives this adapter. It opens a journal and a separate
-checkpoint volume, binds no listener, and holds no database credential. Its
-configuration surface is in runtime.md.
+`log-analysis cloudwatch` is the production driver for this adapter. It opens a
+journal, a separate checkpoint volume, and the CockroachDB store, binds no
+listener, and runs both the poll worker and process worker against the same
+coordinator. `log-analysis source` retains the source-only behavior for adapter
+diagnostics but is not a deployable production topology because its journal has
+no owner that can drain it. The configuration surface is in runtime.md.
 
 The checkpoint volume MUST be separate from the journal volume. The two have
 different lifetimes: a journal is drained and may be rebuilt, and a checkpoint
 rebuilt alongside it would reread the whole lookback window.
 
-On shutdown the poller is stopped before the checkpoint volume is closed, so a
-cycle in flight can still commit the checkpoint for what it has already
-delivered.
+On drain and shutdown the poller is stopped before the process worker and before
+the checkpoint volume is closed, so a cycle in flight can still commit the
+checkpoint for what it has already delivered and no new journal work races the
+drain.
 
 ## Still open
 
 - Only one source type exists. `SourceType` admits `cloudwatch` and `otlp`; a
   third would need its own identity version, not a reuse of `cw:v1`.
-- Enrichment does not run, so a CloudWatch record's deployment identity is
-  whatever normalization defaults to.
+- The combined role uses the same non-blocking enrichment coordinator as OTLP.
+  A real enrichment provider and late-answer context versioning remain absent.
