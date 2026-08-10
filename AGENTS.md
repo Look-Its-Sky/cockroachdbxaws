@@ -73,18 +73,17 @@ rather than container stopped), replica drain, the admin health/readiness/
 metrics listener, and `deploy/collector/` with the first-pass redaction
 security.md requires before the Collector's persistent queue.
 
-The service-local production package is now present: `chart/static-log-analysis`
-installs the mTLS Collector gateway, combined `all` StatefulSet, migration Job,
-and outbox Deployment on EKS; `infra/aws` creates the regional encrypted SQS
-queues and least-privilege EKS Pod Identity roles. The fast CI gate lints and
-renders the chart and validates the Terraform module. It consumes rather than
-creates the provider-managed CockroachDB cluster.
+The service-local hackathon deployment is intentionally small:
+`deploy/aws/compose.yaml` runs migration, combined CloudWatch processing, and
+outbox containers on one EC2 host; `infra/aws` creates that host, its encrypted
+disk, regional SQS queues, stable outbound address, and least-privilege instance
+role. The fast CI gate renders Compose and validates Terraform. Managed
+CockroachDB remains external.
 
-The production CloudWatch pull path is the combined `cloudwatch` role. Its poll
-and process workers share one journal, it retains checkpoints on a second
-volume, and the chart deploys it as an optional single-replica StatefulSet.
-`infra/aws` creates its exact-log-group `logs:FilterLogEvents` Pod Identity.
-The source-only role remains a diagnostic surface and is not deployed.
+The AWS CloudWatch pull path is the combined `cloudwatch` role. Its poll and
+process workers share one journal, checkpoints live on a second Docker volume,
+and the EC2 instance profile grants exact-log-group `logs:FilterLogEvents` plus
+SQS publishing. The source-only role remains diagnostic and is not deployed.
 
 Missing: a real enrichment provider and late-answer context versioning, the
 audit-event subsystem, rule reload, an operator-facing suppress/reopen API, and

@@ -262,30 +262,17 @@ docker compose down --volumes
 
 The volume reset permanently deletes queued logs and local incident history.
 
-## Production deployment boundary
+## AWS deployment
 
-The image is deployable independently of the local dependencies:
+The hackathon deployment has one path: Terraform creates one outbound-only EC2
+host, and that host runs `deploy/aws/compose.yaml`. The combined `cloudwatch`
+role pulls and processes logs against its own durable journal; `outbox`
+publishes elected investigations to regional SQS. Managed CockroachDB remains
+external and its TLS DSN is retrieved from SSM Parameter Store at runtime.
 
-```bash
-docker build -t static-log-analysis:local .
-```
-
-Production uses the official managed CockroachDB provider rather than the local
-`cockroachdb` Compose service. Supply the provider-issued regional TLS DSN to a
-one-shot migration job and then to the analysis and outbox workloads through
-`STATIC_LOG_ANALYSIS_DATABASE_DSN`.
-
-Production must also replace LocalStack with regional Amazon SQS, plaintext
-`static_local` OTLP trust with mutual TLS, and local volumes with measured
-region-local persistent storage. Do not expose the local Compose deployment as
-a production security model.
-
-The production EKS package is in
-[`chart/static-log-analysis`](chart/static-log-analysis/README.md). Regional
-SQS queues and EKS Pod Identity wiring are in
-[`infra/aws`](infra/aws/README.md). The package intentionally consumes an
-existing EKS cluster, storage class, provider-managed CockroachDB TLS DSN, and
-certificate secrets; it does not take ownership of those platform resources.
+Follow the [single deployment guide](../../docs/static-log-analysis/deployment.md).
+The root `compose.yaml` remains local development infrastructure and must not be
+used as the AWS security model.
 
 ## Tests
 

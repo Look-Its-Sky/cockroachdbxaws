@@ -1,0 +1,88 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf install -y docker git awscli-2
+systemctl enable --now docker
+
+install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/static-log-analysis
+curl -fsSL \
+  https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+echo 'c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum --check
+chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version
+
+printf '%s' '${compose_base64}' | base64 --decode > /opt/static-log-analysis/compose.yaml
+chmod 0644 /opt/static-log-analysis/compose.yaml
+
+cat > /etc/static-log-analysis.env <<'ENVIRONMENT'
+SLA_REGION='${region}'
+SLA_TENANT_ID='${tenant_id}'
+SLA_CLASSIFICATION='${classification}'
+SLA_SOURCE_ACCOUNT='${source_account}'
+SLA_SOURCE_INSTANCE='ec2-singleton'
+SLA_CREDENTIAL_IDENTITY='${credential_identity}'
+SLA_CLOUDWATCH_LOG_GROUPS='${cloudwatch_groups}'
+SLA_OUTBOX_QUEUE_URL='${queue_url}'
+SLA_OUTBOX_DEAD_LETTER_QUEUE_URL='${dead_letter_queue_url}'
+SLA_DATABASE_PARAMETER_NAME='${database_parameter_name}'
+SLA_REPOSITORY_URL='${repository_url}'
+SLA_REPOSITORY_REF='${repository_ref}'
+SLA_JOURNAL_MAX_BYTES='${journal_max_bytes}'
+SLA_JOURNAL_MIN_FREE_BYTES='${journal_min_free_bytes}'
+ENVIRONMENT
+chmod 0600 /etc/static-log-analysis.env
+
+cat > /usr/local/sbin/start-static-log-analysis <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+set -a
+. /etc/static-log-analysis.env
+set +a
+
+export STATIC_LOG_ANALYSIS_DATABASE_DSN
+STATIC_LOG_ANALYSIS_DATABASE_DSN="$(aws ssm get-parameter \
+  --region "$SLA_REGION" \
+  --name "$SLA_DATABASE_PARAMETER_NAME" \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text)"
+
+repository=/opt/static-log-analysis/repository
+if [ ! -d "$repository/.git" ]; then
+  install -d -m 0755 "$repository"
+  git -C "$repository" init
+  git -C "$repository" remote add origin "$SLA_REPOSITORY_URL"
+fi
+git -C "$repository" fetch --depth 1 origin "$SLA_REPOSITORY_REF"
+git -C "$repository" reset --hard FETCH_HEAD
+
+docker compose \
+  --project-name static-log-analysis-aws \
+  --file /opt/static-log-analysis/compose.yaml \
+  up --build --detach --remove-orphans
+SCRIPT
+chmod 0750 /usr/local/sbin/start-static-log-analysis
+
+cat > /etc/systemd/system/static-log-analysis.service <<'UNIT'
+[Unit]
+Description=Static Log Analysis Service
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/static-log-analysis.env
+ExecStart=/usr/local/sbin/start-static-log-analysis
+ExecStop=/bin/bash -c 'STATIC_LOG_ANALYSIS_DATABASE_DSN=unused /usr/bin/docker compose --project-name static-log-analysis-aws --file /opt/static-log-analysis/compose.yaml down'
+TimeoutStartSec=30min
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now static-log-analysis.service

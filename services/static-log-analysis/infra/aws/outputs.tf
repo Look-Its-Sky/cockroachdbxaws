@@ -1,38 +1,29 @@
-output "assignment_queue_url" {
-  description = "Set as outbox.queueURL in Helm values."
-  value       = aws_sqs_queue.assignments.url
+output "instance_id" {
+  description = "Use this ID with AWS Systems Manager Session Manager."
+  value       = aws_instance.service.id
 }
 
-output "assignment_queue_arn" {
-  value = aws_sqs_queue.assignments.arn
+output "instance_public_ip" {
+  description = "Stable outbound address to authorize in CockroachDB Cloud. The security group permits no inbound traffic."
+  value       = aws_eip.service.public_ip
+}
+
+output "assignment_queue_url" {
+  value = aws_sqs_queue.assignments.url
 }
 
 output "dead_letter_queue_url" {
-  description = "Set as outbox.deadLetterQueueURL in Helm values."
-  value       = aws_sqs_queue.dead_letter.url
+  value = aws_sqs_queue.dead_letter.url
 }
 
-output "dead_letter_queue_arn" {
-  value = aws_sqs_queue.dead_letter.arn
+output "service_role_arn" {
+  value = aws_iam_role.service.arn
 }
 
-output "outbox_role_arn" {
-  value = aws_iam_role.outbox.arn
-}
-
-output "agent_role_arn" {
-  value = try(aws_iam_role.agent[0].arn, null)
-}
-
-output "cloudwatch_role_arn" {
-  description = "Set as cloudwatch.credentialIdentity in Helm values."
-  value       = try(aws_iam_role.cloudwatch[0].arn, null)
+output "start_session_command" {
+  value = "aws ssm start-session --region ${var.region} --target ${aws_instance.service.id}"
 }
 
 output "cloudwatch_log_groups" {
-  description = "Deterministic role flag value represented by cloudwatch.sources in Helm."
-  value = join(",", [
-    for key in sort(keys(var.cloudwatch_sources)) :
-    "${var.cloudwatch_sources[key].log_group_name}=${var.cloudwatch_sources[key].service}=${var.cloudwatch_sources[key].environment}"
-  ])
+  value = local.cloudwatch_groups
 }

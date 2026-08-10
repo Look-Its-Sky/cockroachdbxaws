@@ -243,7 +243,7 @@ tdd-plan.md lists seven. Status:
 | Fast unit/fixture/property on every change | `static-log-analysis.yml` → `fast` |
 | Integration with race detector | `static-log-analysis.yml` → `integration` |
 | Schema generation and compatibility | `scripts/check-generated-proto.sh` in `fast` |
-| Production deployment package | `scripts/check-production-deployment.sh` in `fast`; Helm lint/render plus Terraform format/init/validate |
+| Production deployment package | `scripts/check-production-deployment.sh` in `fast`; AWS Compose render plus Terraform format/init/validate |
 | Migration apply and compatibility | implicit — every integration test applies migrations; no dedicated gate |
 | Redaction regression corpus | fuzz seed corpora run in `fast`; nightly fuzz in `static-log-analysis-nightly.yml` |
 | End-to-end vertical slice on affected pull requests | runs in `integration` on every pull request, not path-filtered |
@@ -305,6 +305,6 @@ ingress network and overlay renderer, an OTLP-to-SQS deployment smoke script,
 and the measured deterministic `derived:v1` compatibility path for producers
 without a native UUIDv7. The OpenTelemetry Demo Collector is wired through that
 generic ingress contract, but the specific Flagd scenarios remain outstanding.
-The service-local production EKS chart and regional AWS Terraform module are
-also validated in the fast gate; they preserve the safe `all` topology and do
-not enable the unresolved split-role path.
+The service-local EC2 Compose package and regional AWS Terraform module are
+also validated in the fast gate. The AWS deployment runs the combined
+`cloudwatch` role and does not enable the unresolved split-role path.

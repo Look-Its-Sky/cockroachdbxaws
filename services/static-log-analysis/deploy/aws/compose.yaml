@@ -1,0 +1,90 @@
+name: static-log-analysis-aws
+
+x-service: &service
+  image: static-log-analysis:hackathon
+  build:
+    context: /opt/static-log-analysis/repository/services/static-log-analysis
+    dockerfile: Dockerfile
+  environment:
+    STATIC_LOG_ANALYSIS_DATABASE_DSN: ${STATIC_LOG_ANALYSIS_DATABASE_DSN:?database DSN was not loaded from SSM}
+    AWS_REGION: ${SLA_REGION:?AWS region is required}
+  restart: unless-stopped
+
+services:
+  volume-init:
+    image: alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown -R 10001:10001 /journal /checkpoints"]
+    volumes:
+      - analysis-journal:/journal
+      - cloudwatch-checkpoints:/checkpoints
+    restart: "no"
+
+  migrate:
+    <<: *service
+    entrypoint: ["/usr/local/bin/log-analysis-migrate"]
+    restart: "no"
+
+  cloudwatch:
+    <<: *service
+    command:
+      - cloudwatch
+      - -region=${SLA_REGION}
+      - -tenant-id=${SLA_TENANT_ID}
+      - -classification=${SLA_CLASSIFICATION:-SENSITIVE}
+      - -worker-owner=ec2-cloudwatch
+      - -journal-dir=/var/lib/static-log-analysis/journal
+      - -journal-max-bytes=${SLA_JOURNAL_MAX_BYTES:-16106127360}
+      - -journal-min-free-bytes=${SLA_JOURNAL_MIN_FREE_BYTES:-2147483648}
+      - -cloudwatch-account=${SLA_SOURCE_ACCOUNT}
+      - -cloudwatch-log-groups=${SLA_CLOUDWATCH_LOG_GROUPS}
+      - -cloudwatch-source-instance=${SLA_SOURCE_INSTANCE}
+      - -cloudwatch-credential-identity=${SLA_CREDENTIAL_IDENTITY}
+      - -cloudwatch-checkpoint-dir=/var/lib/static-log-analysis/checkpoints
+      - -admin-listen=0.0.0.0:9464
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - analysis-journal:/var/lib/static-log-analysis/journal
+      - cloudwatch-checkpoints:/var/lib/static-log-analysis/checkpoints
+    ports:
+      - "127.0.0.1:9464:9464"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9464/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+
+  outbox:
+    <<: *service
+    command:
+      - outbox
+      - -region=${SLA_REGION}
+      - -tenant-id=${SLA_TENANT_ID}
+      - -classification=${SLA_CLASSIFICATION:-SENSITIVE}
+      - -worker-owner=ec2-outbox
+      - -outbox-queue-url=${SLA_OUTBOX_QUEUE_URL}
+      - -outbox-dead-letter-queue-url=${SLA_OUTBOX_DEAD_LETTER_QUEUE_URL}
+      - -admin-listen=0.0.0.0:9464
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:9465:9464"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9464/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+
+volumes:
+  analysis-journal:
+  cloudwatch-checkpoints:

@@ -12,6 +12,8 @@
 
 # Terraform local state and provider cache. Lock files remain versioned.
 **/.terraform/*
+**/terraform.tfvars
 *.tfstate
 *.tfstate.*
+*.tfplan
 crash.log

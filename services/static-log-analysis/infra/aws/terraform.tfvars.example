@@ -1,11 +1,11 @@
-region               = "us-east-1"
-eks_cluster_name     = "application-production"
-kubernetes_namespace = "static-log-analysis"
+region    = "us-east-1"
+tenant_id = "hackathon-production"
 
-tags = {
-  Environment = "production"
-  Project     = "application"
-}
+# Pin this to the commit you want the EC2 instance to build.
+repository_ref = "Static-Log-Analysis"
+
+# Create this SecureString before terraform apply. Never put its value here.
+database_dsn_parameter_name = "/static-log-analysis/database-dsn"
 
 cloudwatch_sources = {
   api = {
@@ -20,4 +20,9 @@ cloudwatch_sources = {
     service        = "worker"
     environment    = "production"
   }
+}
+
+tags = {
+  Environment = "hackathon"
+  Project     = "application"
 }
