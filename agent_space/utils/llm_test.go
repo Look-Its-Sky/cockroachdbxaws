@@ -5,9 +5,7 @@ import (
 	"testing"
 )
 
-// clearLLMEnv blanks every variable the resolvers read, plus the retired ones,
-// so each case starts from a known state regardless of the developer's real
-// .env.
+// blank every variable the resolvers read, plus the retired ones, so cases start from a known state
 func clearLLMEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -18,14 +16,11 @@ func clearLLMEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
-	// The warn-once state is package-global; reset it so warnings are not
-	// suppressed across cases.
+	// warn-once state is package-global, so reset it or warnings are suppressed across cases
 	warnOnce.Clear()
 }
 
-// openRouterEnv mimics the committed .env: a fully configured OpenRouter setup.
-// Every self-hosted case starts from this, because the whole point is that a
-// leftover OpenRouter configuration must not leak into local requests.
+// mimics the committed .env; every self-hosted case starts here because leftover OpenRouter config must not leak into local requests
 func openRouterEnv(t *testing.T) {
 	t.Helper()
 	clearLLMEnv(t)
@@ -53,9 +48,7 @@ func TestSelfHostedDetection(t *testing.T) {
 	}
 }
 
-// One variable names the chat model wherever it runs. Previously OPENROUTER_MODEL
-// was ignored the moment OPENAI_BASE_URL was set, which meant two names for one
-// setting and a silent fallback when only one of them was filled in.
+// one variable names the chat model wherever it runs; OPENROUTER_MODEL used to be ignored the moment OPENAI_BASE_URL was set
 func TestChatModelUsesOneVariableForBothProviders(t *testing.T) {
 	clearLLMEnv(t)
 	t.Setenv("OPENROUTER_MODEL", "qwen2.5-coder:32b")
@@ -70,9 +63,7 @@ func TestChatModelUsesOneVariableForBothProviders(t *testing.T) {
 	}
 }
 
-// The reason embeddings no longer follow OPENAI_BASE_URL: the vector column is
-// sized to the embedder at CREATE TABLE, so moving chat to a local model must
-// not quietly move the embedder too and invalidate every stored vector.
+// why embeddings no longer follow OPENAI_BASE_URL: the column is sized to the embedder, so moving chat must not invalidate every stored vector
 func TestEmbeddingsStayOnOpenRouterWhenChatIsSelfHosted(t *testing.T) {
 	openRouterEnv(t)
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
@@ -113,9 +104,7 @@ func TestSelfHostedDefaultsWithoutModelName(t *testing.T) {
 	clearLLMEnv(t)
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:8080/v1")
 
-	// No OPENROUTER_MODEL: fall back to a neutral placeholder rather than an
-	// OpenRouter name, so servers that ignore the field work and servers that
-	// do not produce a legible error.
+	// no OPENROUTER_MODEL: a neutral placeholder, so servers that ignore the field work and ones that do not give a legible error
 	if got := ChatModel(); got != placeholderModel {
 		t.Errorf("ChatModel() = %q, want %q", got, placeholderModel)
 	}
@@ -129,8 +118,7 @@ func TestEmbeddingSelfHostedViaEmbeddingBaseURL(t *testing.T) {
 	if !EmbeddingSelfHosted() {
 		t.Error("EmbeddingSelfHosted() = false with EMBEDDING_BASE_URL set")
 	}
-	// Suppressed by default, because most local embedding servers reject the
-	// `dimensions` field.
+	// suppressed by default, because most local embedding servers reject the dimensions field
 	if got := EmbeddingDimensions(); got != 0 {
 		t.Errorf("EmbeddingDimensions() = %d, want 0 so the field is omitted", got)
 	}
@@ -202,14 +190,12 @@ func TestOpenRouterDefaults(t *testing.T) {
 func TestAPIKeyRequiredOnlyForOpenRouter(t *testing.T) {
 	clearLLMEnv(t)
 
-	// Against OpenRouter a missing key is a real error — failing at boot beats
-	// failing on the first request.
+	// against OpenRouter a missing key is a real error; failing at boot beats failing on the first request
 	if _, err := apiKeyFor(openRouterBaseURL); err == nil {
 		t.Error("apiKeyFor(OpenRouter) with no key succeeded, want an error")
 	}
 
-	// Against a self-hosted server it is not: most ignore the header entirely,
-	// and demanding a meaningless secret would be pure friction.
+	// against a self-hosted server it is not, since most ignore the header entirely
 	got, err := apiKeyFor("http://localhost:8000/v1")
 	if err != nil {
 		t.Fatalf("apiKeyFor() against a self-hosted endpoint: %v", err)
@@ -259,8 +245,7 @@ func TestDescribeLLM(t *testing.T) {
 		t.Errorf("DescribeLLM() leaks the API key: %q", got)
 	}
 
-	// Split providers: the line has to show both, or a local chat endpoint that
-	// is not being picked up looks identical to one that is.
+	// the line has to show both, or a local chat endpoint that is not picked up looks identical to one that is
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
 	got = DescribeLLM()
 	for _, want := range []string{"self-hosted", "localhost:11434", "z-ai/glm-5.2", "OpenRouter", "qwen/qwen3-embedding-8b"} {

@@ -17,81 +17,73 @@ const (
 // ErrInvalidOptions is returned when the options given are invalid.
 var ErrInvalidOptions = errors.New("invalid options")
 
-// Option is a function type that can be used to modify the client.
+// enables modification of client
 type Option func(p *Store)
 
-// WithEmbedder is an option for setting the embedder to use. Must be set.
+// specify the embedder to use for generating embeddings
 func WithEmbedder(e embeddings.Embedder) Option {
 	return func(p *Store) {
 		p.embedder = e
 	}
 }
 
-// WithPreDeleteCollection is an option for setting if the collection should be deleted before creating.
+// specify whether to pre-delete the collection before creating it
 func WithPreDeleteCollection(preDelete bool) Option {
 	return func(p *Store) {
 		p.preDeleteCollection = preDelete
 	}
 }
 
-// WithCollectionName is an option for specifying the collection name.
+// specify collection name
 func WithCollectionName(name string) Option {
 	return func(p *Store) {
 		p.collectionName = name
 	}
 }
 
-// WithEmbeddingTableName is an option for specifying the embedding table name.
+// specify embedding table name
 func WithEmbeddingTableName(name string) Option {
 	return func(p *Store) {
 		p.embeddingTableName = name
 	}
 }
 
-// WithCollectionTableName is an option for specifying the collection table name.
+// specify collection table name
 func WithCollectionTableName(name string) Option {
 	return func(p *Store) {
 		p.collectionTableName = name
 	}
 }
 
-// WithConnectionURL is an option for specifying the Postgres connection URL. Either this
-// or WithConn must be used.
+// specify connection url
 func WithConnectionURL(connectionURL string) Option {
 	return func(p *Store) {
 		p.connURL = connectionURL
 	}
 }
 
-// WithConn is an option for specifying the Postgres connection.
-// From pgx doc: it is not safe for concurrent usage.Use a connection pool to manage access
-// to multiple database connections from multiple goroutines.
+// specify active pgx connection
 func WithConn(conn PGXConn) Option {
 	return func(p *Store) {
 		p.conn = conn
 	}
 }
 
-// WithCollectionMetadata is an option for specifying the collection metadata.
+// specify collection metadata
 func WithCollectionMetadata(metadata map[string]any) Option {
 	return func(p *Store) {
 		p.collectionMetadata = metadata
 	}
 }
 
-// WithVectorDimensions is an option for specifying the vector size.
+// specify vector dims
 func WithVectorDimensions(size int) Option {
 	return func(p *Store) {
 		p.vectorDimensions = size
 	}
 }
 
-// WithHNSWIndex is an option for specifying the HNSW index parameters.
-// See here for more details: https://github.com/pgvector/pgvector#hnsw
-//
-// m: he max number of connections per layer (16 by default)
-// efConstruction: the size of the dynamic candidate list for constructing the graph (64 by default)
-// distanceFunction: the distance function to use (l2 by default).
+// hnsw pgvector: m connections per layer (16), efConstruction candidate list size (64), distanceFunction (l2)
 func WithHNSWIndex(m int, efConstruction int, distanceFunction string) Option {
 	return func(p *Store) {
 		p.hnswIndex = &HNSWIndex{

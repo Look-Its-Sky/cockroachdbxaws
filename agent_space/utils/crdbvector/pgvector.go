@@ -17,15 +17,11 @@ import (
 )
 
 const (
-	// pgLockIDEmbeddingTable is used for advisor lock to fix issue arising from concurrent
-	// creation of the embedding table.The same value represents the same lock.
+	// advisory lock id for concurrent creation of the embedding table
 	pgLockIDEmbeddingTable = 1573678846307946494
-	// pgLockIDCollectionTable is used for advisor lock to fix issue arising from concurrent
-	// creation of the collection table.The same value represents the same lock.
+	// advisory lock id for concurrent creation of the collection table
 	pgLockIDCollectionTable = 1573678846307946495
-	// pgLockIDExtension is used for advisor lock to fix issue arising from concurrent creation
-	// of the vector extension. The value is deliberately set to the same as python langchain
-	// https://github.com/langchain-ai/langchain/blob/v0.0.340/libs/langchain/langchain/vectorstores/pgvector.py#L167
+	// advisory lock id for concurrent creation of the vector extension, same value as python langchain
 	pgLockIDExtension = 1573678846307946496
 )
 
@@ -133,27 +129,12 @@ func (s *Store) init(ctx context.Context) error {
 }
 
 func (s Store) createVectorExtensionIfNotExists(ctx context.Context, tx pgx.Tx) error {
-	// inspired by
-	// https://github.com/langchain-ai/langchain/blob/v0.0.340/libs/langchain/langchain/vectorstores/pgvector.py#L167
-	// The advisor lock fixes issue arising from concurrent
-	// creation of the vector extension.
-	// https://github.com/langchain-ai/langchain/issues/12933
-	// For more information see:
-	// https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS
-	// Removed advisory lock for CockroachDB compatibility
-	// Also removed CREATE EXTENSION vector because CockroachDB has it built-in and errors out
+	// no advisory lock and no CREATE EXTENSION vector: CockroachDB has it built in and errors out
 	return nil
 }
 
 func (s Store) createCollectionTableIfNotExists(ctx context.Context, tx pgx.Tx) error {
-	// inspired by
-	// https://github.com/langchain-ai/langchain/blob/v0.0.340/libs/langchain/langchain/vectorstores/pgvector.py#L167
-	// The advisor lock fixes issue arising from concurrent
-	// creation of the vector extension.
-	// https://github.com/langchain-ai/langchain/issues/12933
-	// For more information see:
-	// https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS
-	// Removed advisory lock for CockroachDB compatibility
+	// advisory lock removed for CockroachDB compatibility
 	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	name varchar,
 	cmetadata json,
@@ -167,14 +148,7 @@ func (s Store) createCollectionTableIfNotExists(ctx context.Context, tx pgx.Tx) 
 }
 
 func (s Store) createEmbeddingTableIfNotExists(ctx context.Context, tx pgx.Tx) error {
-	// inspired by
-	// https://github.com/langchain-ai/langchain/blob/v0.0.340/libs/langchain/langchain/vectorstores/pgvector.py#L167
-	// The advisor lock fixes issue arising from concurrent
-	// creation of the vector extension.
-	// https://github.com/langchain-ai/langchain/issues/12933
-	// For more information see:
-	// https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS
-	// Removed advisory lock for CockroachDB compatibility
+	// advisory lock removed for CockroachDB compatibility
 
 	vectorDimensions := ""
 	if s.vectorDimensions > 0 {
@@ -215,8 +189,7 @@ func (s Store) createEmbeddingTableIfNotExists(ctx context.Context, tx pgx.Tx) e
 	return nil
 }
 
-// AddDocuments adds documents to the Postgres collection associated with 'Store'.
-// and returns the ids of the added documents.
+// AddDocuments adds documents to the collection and returns their ids.
 func (s Store) AddDocuments(
 	ctx context.Context,
 	docs []schema.Document,
@@ -414,7 +387,6 @@ func (s *Store) createOrGetCollection(ctx context.Context, tx pgx.Tx) error {
 }
 
 // getOptions applies given options to default Options and returns it
-// This uses options pattern so clients can easily pass options without changing function signature.
 func (s Store) getOptions(options ...vectorstores.Option) vectorstores.Options {
 	opts := vectorstores.Options{}
 	for _, opt := range options {
@@ -437,7 +409,6 @@ func (s Store) getScoreThreshold(opts vectorstores.Options) (float32, error) {
 	return opts.ScoreThreshold, nil
 }
 
-// getFilters return metadata filters, now only support map[key]value pattern
 // TODO: should support more types like {"key1": {"key2":"values2"}} or {"key": ["value1", "values2"]}.
 func (s Store) getFilters(opts vectorstores.Options) (map[string]any, error) {
 	if opts.Filters != nil {

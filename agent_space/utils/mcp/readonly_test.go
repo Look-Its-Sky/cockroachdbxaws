@@ -20,9 +20,7 @@ func names(tools []*Tool) string {
 	return strings.Join(out, ",")
 }
 
-// The mix here is copied from cockroachdb-mcp-server 0.1.0: most read tools
-// declare readOnlyHint, the two obvious writers declare it false, and three
-// writers declare nothing at all. That last group is the whole point.
+// copied from cockroachdb-mcp-server 0.1.0: most reads declare readOnlyHint, two writers declare false, three declare nothing
 func TestReadOnlyUsesAnnotations(t *testing.T) {
 	ro := &sdk.ToolAnnotations{ReadOnlyHint: true}
 	rw := &sdk.ToolAnnotations{ReadOnlyHint: false}
@@ -42,9 +40,7 @@ func TestReadOnlyUsesAnnotations(t *testing.T) {
 	}
 }
 
-// A tool that declares nothing must be withheld, not admitted. Getting this
-// backwards would hand the agent create_table and insert_rows on the real
-// server, which is exactly the failure this filter exists to prevent.
+// a tool declaring nothing must be withheld; backwards would hand the agent create_table and insert_rows
 func TestReadOnlyFailsClosedOnMissingAnnotations(t *testing.T) {
 	got := ReadOnly([]*Tool{
 		toolWith("select_query", &sdk.ToolAnnotations{ReadOnlyHint: true}),
@@ -56,9 +52,7 @@ func TestReadOnlyFailsClosedOnMissingAnnotations(t *testing.T) {
 	}
 }
 
-// When no tool declares the hint the server publishes no annotations at all,
-// and failing closed would leave the agent with nothing. The name fallback
-// keeps it working — this is the likely shape of an unfamiliar server.
+// with no annotations at all, failing closed leaves nothing, so the name fallback keeps it working
 func TestReadOnlyFallsBackToNamesWhenNothingIsAnnotated(t *testing.T) {
 	got := ReadOnly([]*Tool{
 		toolWith("select_query", nil),
@@ -82,8 +76,7 @@ func TestReadOnlyEmptyInput(t *testing.T) {
 	}
 }
 
-// The real server, end to end: the filter must leave the agent a usable set,
-// not an empty one.
+// the real server end to end: the filter must leave a usable set, not an empty one
 func TestReadOnlyKeepsSessionToolsUsable(t *testing.T) {
 	session, _ := connectFake(t)
 
@@ -124,8 +117,7 @@ func TestExcludeDropsNamedToolsOnly(t *testing.T) {
 }
 
 func TestExcludeMatchesWholeNamesNotPrefixes(t *testing.T) {
-	// "show_" as a prefix would take show_statement's neighbours with it, so
-	// matching is exact.
+	// "show_" as a prefix would take its neighbours with it, so matching is exact
 	tools := []*Tool{
 		{remote: &sdk.Tool{Name: "show_statement"}},
 		{remote: &sdk.Tool{Name: "show_statement_details"}},

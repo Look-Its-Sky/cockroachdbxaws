@@ -6,8 +6,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// LoadConfig loads environment variables from a .env file into the system environment.
-// It tries the current directory first, then the parent directory.
+// loads .env into the environment, current directory first then the parent
 func LoadConfig() {
 	// Try loading from current directory
 	errLocal := godotenv.Load(".env")

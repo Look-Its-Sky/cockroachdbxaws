@@ -1,19 +1,4 @@
-// Command toolcheck measures whether the configured OpenRouter chat model emits
-// well-formed tool calls.
-//
-// The whole agent rests on this: if the model cannot reliably request a tool
-// with valid arguments, the MCP integration produces nothing no matter how
-// correct the client is. OpenRouter advertising `tools` in supported_parameters
-// is a claim about the API surface, not about the model's behaviour, so this
-// measures the behaviour directly before anything is built on top of it.
-//
-// Usage:
-//
-//	go run ./cmd/toolcheck              # 20 iterations against OPENROUTER_MODEL
-//	go run ./cmd/toolcheck -n 40        # more samples
-//	go run ./cmd/toolcheck -model qwen/qwen3-coder-next
-//
-// Exits non-zero if the pass rate falls below -threshold, so it can gate CI.
+// Command toolcheck measures whether the configured model emits well-formed tool calls; exits non-zero below -threshold.
 package main
 
 import (
@@ -32,8 +17,7 @@ import (
 	"agent_space/utils/mcp"
 )
 
-// The fixtures mirror two real CockroachDB Cloud MCP tools, schemas included,
-// so the measurement reflects the shapes the agent actually sends.
+// fixtures mirror two real Cloud MCP tools, schemas included
 var fixtureTools = []llms.Tool{
 	{
 		Type: "function",
@@ -75,8 +59,7 @@ var requiredArgs = map[string][]string{
 	"list_tables":  {"database", "schema"},
 }
 
-// prompts alternate so a single lucky phrasing cannot carry the score. Each one
-// has an unambiguous correct tool.
+// prompts alternate so one lucky phrasing cannot carry the score
 var prompts = []struct {
 	text     string
 	wantTool string
@@ -103,9 +86,7 @@ type result struct {
 	correct  bool // it picked the tool the prompt called for
 }
 
-// ok reports whether this iteration produced a usable tool call. Picking a
-// different valid tool is a judgement call, not a malformation, so `correct` is
-// reported separately and does not gate the pass rate.
+// a usable tool call; picking a different valid tool is judgement, so correct is separate and does not gate the pass rate
 func (r result) ok() bool { return r.emitted && r.named && r.parsed && r.complete }
 
 func main() {
@@ -198,8 +179,7 @@ func probe(model llms.Model, i, maxTokens int) result {
 	r.stopReason = choice.StopReason
 	r.content = choice.Content
 
-	// Accept either shape: the modern tool_calls array, or the legacy single
-	// function_call some providers still emit.
+	// accept either shape: the modern tool_calls array or the legacy function_call
 	var name, args string
 	switch {
 	case len(choice.ToolCalls) > 0 && choice.ToolCalls[0].FunctionCall != nil:
@@ -223,8 +203,7 @@ func probe(model llms.Model, i, maxTokens int) result {
 		return r
 	}
 
-	// Grade against ParseArgs, the same normaliser the agent uses, so the score
-	// reflects what the agent will actually tolerate rather than raw JSON purity.
+	// grade against ParseArgs, the same normaliser the agent uses
 	schema := schemaFor(name)
 	parsed, err := mcp.ParseArgs(args, schema)
 	if err != nil {
@@ -266,8 +245,7 @@ func passRate(results []result) float64 {
 	return float64(passed) / float64(len(results))
 }
 
-// report prints a per-stage breakdown, so a failure says which stage broke
-// rather than just "it did not work".
+// per-stage breakdown, so a failure says which stage broke
 func report(results []result, verbose bool) {
 	stages := []struct {
 		label string
@@ -343,8 +321,7 @@ func clip(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// compile-time guard that the fixture schemas stay JSON-encodable, since they
-// travel to the provider verbatim.
+// compile-time guard that the fixture schemas stay JSON-encodable
 var _ = func() bool {
 	for _, t := range fixtureTools {
 		if _, err := json.Marshal(t.Function.Parameters); err != nil {

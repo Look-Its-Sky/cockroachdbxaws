@@ -53,9 +53,7 @@ func TestConnectDiscoversTools(t *testing.T) {
 		t.Fatal("select_query not found")
 	}
 
-	// The raw schema must survive discovery intact: the native tool loop hands
-	// it straight to the model, so any lossy conversion here stays invisible
-	// until the model starts guessing at argument shapes.
+	// the raw schema must survive discovery intact, or the model starts guessing at argument shapes
 	schema, ok := tool.Schema().(map[string]any)
 	if !ok {
 		t.Fatalf("Schema() = %T, want map[string]any", tool.Schema())
@@ -106,8 +104,7 @@ func TestConnectWithoutAPIKey(t *testing.T) {
 }
 
 func TestConnectTransportFailure(t *testing.T) {
-	// A dead endpoint must return an error rather than hanging or panicking:
-	// boot treats this as "run without MCP".
+	// a dead endpoint must error rather than hang, since boot treats it as "run without MCP"
 	_, err := Connect(t.Context(), Config{URL: "http://127.0.0.1:1/mcp", APIKey: "secret-key"})
 	if err == nil {
 		t.Fatal("Connect to a dead endpoint succeeded, want error")
@@ -139,8 +136,7 @@ func TestInvokeSurfacesToolErrorAsText(t *testing.T) {
 	session, _ := connectFake(t)
 	tool, _ := session.Tool("select_query")
 
-	// A tool-level rejection must come back as readable text, not a Go error,
-	// so the model can correct the statement and retry.
+	// a tool-level rejection comes back as readable text, not a Go error, so the model can retry
 	out, err := tool.Invoke(t.Context(), map[string]any{"query": "DROP TABLE incidents"})
 	if err != nil {
 		t.Fatalf("Invoke returned a Go error for a tool-level failure: %v", err)
@@ -181,17 +177,14 @@ func TestCallParsesModelStrings(t *testing.T) {
 
 func TestCallRejectsUnparseableInputWithSchema(t *testing.T) {
 	session, _ := connectFake(t)
-	// get_table_schema needs two fields, so bare text is genuinely ambiguous
-	// and must fail rather than guess. list_tables requires only "database",
-	// so it would legitimately wrap bare text instead.
+	// get_table_schema needs two fields so bare text is ambiguous and must fail rather than guess
 	tool, _ := session.Tool("get_table_schema")
 
 	_, err := tool.Call(t.Context(), "just tell me the columns")
 	if err == nil {
 		t.Fatal("Call with ambiguous input succeeded, want an error")
 	}
-	// The error is the model's only feedback channel, so it has to name the
-	// fields the tool wants.
+	// the error is the model's only feedback channel, so it has to name the fields
 	for _, want := range []string{"database", "table"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q, so the model cannot retry: %v", want, err)
@@ -199,9 +192,7 @@ func TestCallRejectsUnparseableInputWithSchema(t *testing.T) {
 	}
 }
 
-// The single-required-field wrap is what lets a model that emits bare text
-// still drive a tool. list_tables is the real example: "defaultdb" is
-// unambiguous because "database" is the only field that must be supplied.
+// the single-required-field wrap is what lets a model emitting bare text still drive a tool
 func TestCallWrapsBareTextForSingleRequiredField(t *testing.T) {
 	session, fake := connectFake(t)
 	tool, _ := session.Tool("list_tables")
@@ -237,8 +228,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:  "prose before json is not treated as an object",
 			input: "Here you go: {\"query\": \"SELECT 1\"}",
-			// Falls back to the single-required-field wrap, which keeps the
-			// call alive; the server rejects it if the SQL is wrong.
+			// falls back to the single-required-field wrap; the server rejects it if the SQL is wrong
 			schema: selectQuerySchema,
 			want:   map[string]any{"query": "Here you go: {\"query\": \"SELECT 1\"}"},
 		},
@@ -320,10 +310,7 @@ func TestConfigFromEnv(t *testing.T) {
 	}
 }
 
-// A no-argument tool publishes {"type":"object"} with no "properties". That is
-// legal MCP, but LM Studio rejects the entire function list with a 400 when the
-// key is missing — so one such tool breaks every call in the batch, not just
-// its own.
+// a no-argument tool publishes no "properties", which is legal MCP but 400s the whole batch on LM Studio
 func TestSchemaFillsInPropertiesForNoArgTools(t *testing.T) {
 	session, _ := connectFake(t)
 
@@ -389,8 +376,7 @@ func TestNoArgToolIsCallable(t *testing.T) {
 	}
 }
 
-// clusterScopedTool mirrors what the Cloud server publishes for a
-// cluster-scoped tool: cluster_id sitting alongside the real arguments.
+// mirrors what the Cloud server publishes: cluster_id beside the real arguments
 func clusterScopedTool(clusterID string, required []any) *Tool {
 	return &Tool{
 		remote: &sdk.Tool{
@@ -410,10 +396,7 @@ func clusterScopedTool(clusterID string, required []any) *Tool {
 }
 
 func TestSchemaHidesClusterIDWhenSessionIsScoped(t *testing.T) {
-	// The server rejects the whole call when cluster_id arrives alongside the
-	// mcp-cluster-id header, and a model shown the property will fill it in —
-	// it did, reading the real UUID out of a prior list_clusters result. The
-	// only durable fix is not to show it.
+	// the server rejects the call when cluster_id arrives with the header, and a model shown the property fills it in, so the fix is not to show it
 	tool := clusterScopedTool("8fdfa73f-06b5-4fbb-a47a-7888a1bda51f", []any{"cluster_id", "database"})
 
 	schema, ok := tool.Schema().(map[string]any)
@@ -428,8 +411,7 @@ func TestSchemaHidesClusterIDWhenSessionIsScoped(t *testing.T) {
 		t.Errorf("the real arguments were lost: %v", props)
 	}
 
-	// Leaving it in "required" would be worse than leaving it in properties:
-	// a strict server rejects the call for omitting a required field.
+	// leaving it in "required" is worse than in properties: a strict server rejects the call for omitting it
 	req, _ := schema["required"].([]any)
 	for _, r := range req {
 		if r == "cluster_id" {
@@ -449,8 +431,7 @@ func TestSchemaHidesClusterIDWhenSessionIsScoped(t *testing.T) {
 }
 
 func TestSchemaKeepsClusterIDWhenSessionIsNotScoped(t *testing.T) {
-	// Organization-wide sessions send no header, so the argument is the only
-	// way to name a cluster and must survive.
+	// org-wide sessions send no header, so the argument is the only way to name a cluster
 	tool := clusterScopedTool("", []any{"cluster_id"})
 
 	schema, _ := tool.Schema().(map[string]any)
@@ -461,8 +442,7 @@ func TestSchemaKeepsClusterIDWhenSessionIsNotScoped(t *testing.T) {
 }
 
 func TestSchemaDropsRequiredWhenClusterIDWasItsOnlyEntry(t *testing.T) {
-	// "required": [] is not valid JSON Schema, and strict OpenAI-compatible
-	// servers reject the whole tool list over it.
+	// "required": [] is not valid JSON Schema and strict servers reject the whole tool list
 	tool := clusterScopedTool("some-cluster", []any{"cluster_id"})
 
 	schema, _ := tool.Schema().(map[string]any)

@@ -1,7 +1,4 @@
-// Package mcp connects the agent to the CockroachDB Cloud Managed MCP Server
-// and exposes its remote tools in the two shapes the rest of the codebase
-// needs: langchaingo's tools.Tool, and a schema-carrying form the native tool
-// loop can hand straight to the model.
+// Package mcp connects the agent to the CockroachDB Cloud Managed MCP Server and exposes its tools as both tools.Tool and a schema-carrying form.
 package mcp
 
 import (
@@ -18,43 +15,22 @@ import (
 	"agent_space/utils"
 )
 
-// DefaultURL is the managed MCP endpoint. The server speaks streamable HTTP;
-// SSE is deliberately not offered, so the transport below is the only option.
+// the managed MCP endpoint; the server speaks streamable HTTP, not SSE
 const DefaultURL = "https://cockroachlabs.cloud/mcp"
 
-// clusterIDHeader scopes every request to a single cluster. Omitting it widens
-// access to every cluster the API key's Cloud RBAC roles permit, which is more
-// authority than this agent needs.
+// scopes every request to one cluster; omitting it widens access to every cluster the key permits
 const clusterIDHeader = "mcp-cluster-id"
 
-// connectTimeout bounds the initialize + tools/list handshake at boot, so a
-// wrong URL fails startup quickly instead of hanging it.
+// bounds the handshake at boot so a wrong URL fails startup quickly
 const connectTimeout = 30 * time.Second
 
-// requestTimeout is the ceiling on any single HTTP request, and must stay well
-// above the server's own 20s query cap — http.Client.Timeout applies to every
-// request, not just the handshake, so setting it to connectTimeout would cut
-// off legitimate slow queries.
+// ceiling on any single request; must stay above the server's own 20s query cap
 const requestTimeout = 90 * time.Second
 
-// ErrNotConfigured signals that no API key was supplied. Callers treat this as
-// "run without MCP" rather than a failure, so the vector-only routes stay up.
+// no API key supplied; callers treat this as "run without MCP" so the vector-only routes stay up
 var ErrNotConfigured = errors.New("mcp: COCKROACH_API_KEY is not set")
 
-// IsSessionFailure reports whether an error from a tool call means the session
-// itself is unusable, as opposed to the server refusing that one call.
-//
-// The distinction decides whether a run can continue, and it cannot be made by
-// asking "did CallTool return an error": the Cloud server rejects a call for
-// policy reasons — a restricted schema, a malformed argument — with a JSON-RPC
-// error rather than a result carrying isError. Those are recoverable, and the
-// model routinely does recover by querying a different way. Treating every
-// returned error as fatal aborts runs that were one tool call from an answer.
-//
-// So the test is inverted: fatal only for the failures known to be fatal. The
-// SDK's WireError type is in an internal package, so its code cannot be
-// inspected — but it exports sentinels for exactly the unrecoverable cases,
-// and a timed-out or cancelled request is unrecoverable by inspection.
+// whether the session itself is unusable, as opposed to the server refusing one call. Policy rejections come back as JSON-RPC errors and are recoverable, so only known-fatal cases count.
 func IsSessionFailure(err error) bool {
 	if err == nil {
 		return false
@@ -65,8 +41,7 @@ func IsSessionFailure(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	// http.Client.Timeout surfaces as a *url.Error that does not always wrap
-	// context.DeadlineExceeded, so ask the net.Error interface directly.
+	// http.Client.Timeout is a *url.Error that does not always wrap context.DeadlineExceeded
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
@@ -78,8 +53,7 @@ type Config struct {
 	ClusterID string
 }
 
-// ConfigFromEnv reads the MCP settings using the same envOr convention as the
-// LLM configuration.
+// MCP settings, using the same envOr convention as the LLM configuration
 func ConfigFromEnv() Config {
 	return Config{
 		URL:       utils.EnvOr("COCKROACH_MCP_URL", DefaultURL),
@@ -93,9 +67,7 @@ func (c Config) Configured() bool {
 	return c.APIKey != "" && c.URL != ""
 }
 
-// headerRoundTripper injects the auth and cluster-scope headers on every
-// request. The SDK's StreamableClientTransport exposes an *http.Client but no
-// header hook, so decorating the transport is the only place to put these.
+// injects auth and cluster-scope headers; the SDK's transport exposes an http.Client but no header hook
 type headerRoundTripper struct {
 	base      http.RoundTripper
 	apiKey    string
@@ -117,8 +89,7 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return base.RoundTrip(clone)
 }
 
-// Session is a live connection to the MCP server plus the tools it advertised
-// at connect time.
+// a live connection plus the tools it advertised at connect time
 type Session struct {
 	config  Config
 	session *sdk.ClientSession
@@ -126,10 +97,7 @@ type Session struct {
 	byName  map[string]*Tool
 }
 
-// Connect performs the MCP handshake and discovers the server's tools.
-//
-// A returned error means the agent runs without MCP; it is never fatal to the
-// process, so the caller logs it and carries on.
+// handshake and tool discovery; an error means the agent runs without MCP, never fatal to the process
 func Connect(ctx context.Context, cfg Config) (*Session, error) {
 	if !cfg.Configured() {
 		return nil, ErrNotConfigured
@@ -145,8 +113,7 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		Version: "0.1.0",
 	}, nil)
 
-	// DisableStandaloneSSE: we only ever call tools, so the persistent GET
-	// stream for server-initiated messages is pure liability here.
+	// we only ever call tools, so the persistent GET stream is pure liability
 	transport := &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
 		HTTPClient:           httpClient,
@@ -217,8 +184,7 @@ func (s *Session) Names() []string {
 	return names
 }
 
-// Endpoint returns the URL this session is talking to. Safe to log: it carries
-// no credential.
+// the URL this session talks to; safe to log, it carries no credential
 func (s *Session) Endpoint() string { return s.config.URL }
 
 // ClusterID returns the cluster this session is scoped to, or "" for org-wide.

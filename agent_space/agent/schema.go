@@ -10,16 +10,13 @@ import (
 	"agent_space/utils/mcp"
 )
 
-// Caps on what a schema load will do. The point is to remove work from the
-// iteration budget, not to move an unbounded amount of it to boot.
+// caps on schema
 const (
 	maxSchemaDatabases = 2
 	maxSchemaTables    = 12
 	maxSchemaChars     = 4000
 )
 
-// systemDatabases are never application data, so describing them wastes both
-// boot time and prompt space.
 var systemDatabases = map[string]bool{
 	"system":             true,
 	"postgres":           true,
@@ -29,26 +26,8 @@ var systemDatabases = map[string]bool{
 	"pg_extension":       true,
 }
 
-// internalTablePrefixes marks tables that belong to this application rather
-// than to the service being diagnosed. The vector store's own tables are the
-// agent's memory, not evidence about an incident.
 var internalTablePrefixes = []string{"langchain_"}
 
-// LoadClusterSchema reads the cluster's application tables once, so the model
-// does not spend its iteration budget rediscovering a schema that does not
-// change between runs.
-//
-// This is the single biggest cost in a run. Measured against the seeded demo
-// cluster, four of six tool calls were list_databases, list_tables and two
-// get_table_schema calls — the model only reached a question worth asking on
-// call six, exactly when the iteration cap fired. Those four results are also
-// re-sent on every later iteration, so they cost tokens repeatedly.
-//
-// Errors are not fatal and are not returned as failures of the agent: a
-// cluster that cannot be described at boot simply leaves the model to discover
-// it, which is the old behaviour. The caller logs and carries on.
-//
-// databases, when non-empty, skips discovery and describes exactly those.
 func LoadClusterSchema(ctx context.Context, tools []*mcp.Tool, databases []string) (string, error) {
 	byName := make(map[string]*mcp.Tool, len(tools))
 	for _, t := range tools {
@@ -166,25 +145,18 @@ func describeTable(ctx context.Context, describe *mcp.Tool, database, table stri
 		return "", fmt.Errorf("%s", res.Text)
 	}
 
-	// Prefer the server's CREATE TABLE statement: it is exact, and it is the
-	// form the model is most likely to have seen.
 	for _, row := range rowsOf(res.Text) {
 		if ddl := stringField(row, "create_statement", "ddl", "schema"); ddl != "" {
 			return collapseWhitespace(ddl), nil
 		}
 	}
 
-	// Some servers answer in prose rather than rows. Passing it through beats
-	// discarding a description the model could have used.
 	if text := collapseWhitespace(res.Text); text != "" {
 		return table + ": " + text, nil
 	}
 	return "", nil
 }
 
-// rowsOf pulls the row objects out of an MCP result, which the Cloud server
-// renders as {"rows":[{...}]}. A body in any other shape yields nothing, and
-// callers fall back rather than failing.
 func rowsOf(text string) []map[string]any {
 	var payload struct {
 		Rows []map[string]any `json:"rows"`
@@ -195,8 +167,6 @@ func rowsOf(text string) []map[string]any {
 	return payload.Rows
 }
 
-// stringField returns the first key present as a non-empty string, so one
-// reader copes with the naming differences between servers.
 func stringField(row map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if s, ok := row[k].(string); ok && s != "" {
@@ -216,9 +186,6 @@ func isInternalTable(name string) bool {
 	return false
 }
 
-// collapseWhitespace puts a CREATE TABLE statement on one line. The schema
-// block is prompt context, not something a human reads, and the newlines in a
-// dozen DDL statements are pure token cost.
 func collapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }

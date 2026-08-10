@@ -1,22 +1,4 @@
-// Command nuke wipes the vector store so a test run starts from nothing.
-//
-// Two modes, because they solve different problems:
-//
-//	-mode=truncate  (default) empty the tables, keep the schema. What you want
-//	                between test runs.
-//	-mode=drop      drop the tables entirely. Required after changing the
-//	                embedding dimensions, since the vector column is sized at
-//	                CREATE TABLE and the server recreates it on next boot.
-//
-// It talks to the database directly rather than going through crdbvector,
-// so it needs no embedder and therefore no LLM credentials — and so it still
-// works when the schema is in a state the store refuses to open.
-//
-// Usage:
-//
-//	go run ./cmd/nuke                      # truncate, with a confirmation prompt
-//	go run ./cmd/nuke -mode=drop -yes      # drop, unattended
-//	go run ./cmd/nuke -database-url=...    # override the target
+// Command nuke empties or drops the vector store tables; talks to the database directly so it needs no LLM credentials.
 package main
 
 import (
@@ -35,8 +17,7 @@ import (
 	"agent_space/utils/crdbvector"
 )
 
-// Tables are dropped children-first: langchain_pg_embedding carries a foreign
-// key onto langchain_pg_collection.
+// children first: langchain_pg_embedding has a foreign key onto langchain_pg_collection
 var tables = []string{
 	crdbvector.DefaultEmbeddingStoreTableName,
 	crdbvector.DefaultCollectionStoreTableName,
@@ -64,8 +45,7 @@ func main() {
 		fail(errors.New("DATABASE_URL is not set in the environment or .env file"))
 	}
 
-	// Print where we are about to delete from, so an accidental run against the
-	// production cluster is visible before it happens rather than after.
+	// print the target first so an accidental run against production is visible before it happens
 	fmt.Printf("target:  %s\n", utils.RedactURL(connStr))
 	fmt.Printf("mode:    %s\n", *mode)
 	fmt.Printf("tables:  %s\n\n", strings.Join(tables, ", "))

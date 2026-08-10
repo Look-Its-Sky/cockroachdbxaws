@@ -1,6 +1,4 @@
-// Package mcptest provides an in-process stand-in for the CockroachDB Cloud
-// MCP server, so the client adapter and the agent loop can be tested against a
-// real MCP round trip without cloud credentials or network access.
+// Package mcptest is an in-process stand-in for the Cloud MCP server, so the client and agent loop can be tested over a real MCP round trip.
 package mcptest
 
 import (
@@ -16,15 +14,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// The schemas are copied from a live cockroachdb-mcp-server 0.1.0, as raw JSON
-// objects rather than Go types, so tests see exactly the shapes production
-// does. Getting these wrong is not cosmetic: an earlier version of this file
-// invented select_query{statement}, and because the real tool takes {query}
-// with additionalProperties:false, every test passed while the real call was
-// rejected outright.
-//
-// Keep additionalProperties:false — the SDK validates arguments against these,
-// so a wrong field name fails here the same way it fails against the cluster.
+// schemas copied from a live cockroachdb-mcp-server 0.1.0 as raw JSON, so tests see production shapes; keep additionalProperties:false or a wrong field name passes here and fails against the cluster
 var (
 	SelectQuerySchema = map[string]any{
 		"type":                 "object",
@@ -38,8 +28,7 @@ var (
 		"required": []any{"query"},
 	}
 
-	// ListTablesSchema has one required field and two optional ones, so bare
-	// text is unambiguous and gets wrapped into "database".
+	// one required field and two optional, so bare text is unambiguous and wraps into "database"
 	ListTablesSchema = map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -51,9 +40,7 @@ var (
 		"required": []any{"database"},
 	}
 
-	// GetTableSchemaSchema needs two fields, which is what makes bare text
-	// genuinely ambiguous. This is the real multi-required tool; do not
-	// substitute a single-required one or that distinction stops being tested.
+	// needs two fields, which is what makes bare text ambiguous; do not substitute a single-required tool
 	GetTableSchemaSchema = map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -65,10 +52,7 @@ var (
 		"required": []any{"database", "table"},
 	}
 
-	// NoArgsSchema mirrors what a no-argument tool publishes over the wire:
-	// legal MCP, but missing the "properties" key that strict
-	// OpenAI-compatible servers require. get_cluster and list_cluster_nodes
-	// arrive like this, which is what broke LM Studio for the whole batch.
+	// what a no-argument tool really publishes: legal MCP, but missing the "properties" strict servers require
 	NoArgsSchema = map[string]any{"type": "object"}
 )
 
@@ -87,8 +71,7 @@ type Call struct {
 	Args map[string]any
 }
 
-// Start launches a fake server exposing select_query and list_tables, and
-// registers its shutdown with t.
+// launches a fake server and registers its shutdown with t
 func Start(t *testing.T) *Server {
 	t.Helper()
 
@@ -104,17 +87,12 @@ func Start(t *testing.T) *Server {
 
 		query, _ := args["query"].(string)
 
-		// The Cloud server refuses to touch its restricted schemas, and it
-		// says so with a protocol error rather than a result carrying isError.
-		// That distinction matters: a client that treats every returned error
-		// as a dead session will abandon a run over a single bad query, so the
-		// fake has to be able to produce this shape.
+		// the Cloud server refuses restricted schemas with a protocol error rather than an isError result, so the fake has to produce that shape too
 		if strings.Contains(strings.ToLower(query), "information_schema") {
 			return nil, errors.New(`query references a restricted schema: access to "information_schema" is blocked for security reasons`)
 		}
 
-		// Mirror the real server refusing anything but a read: an error the
-		// model is meant to read and recover from, not a transport failure.
+		// mirror the real server refusing anything but a read: an error the model recovers from, not a transport failure
 		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "SELECT") {
 			return &sdk.CallToolResult{
 				IsError: true,
@@ -199,8 +177,7 @@ func (s *Server) captureHeaders(h http.Header) {
 	}
 }
 
-// Header returns a header from the first request the server received. This is
-// the only way to prove the auth headers survive the client's RoundTripper.
+// a header from the first request, the only way to prove auth headers survive the RoundTripper
 func (s *Server) Header(key string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

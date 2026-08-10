@@ -6,28 +6,12 @@ import (
 	"strings"
 )
 
-// ParseArgs turns whatever the model produced into MCP tool arguments.
-//
-// MCP tools take structured JSON described by a JSON Schema, but langchaingo's
-// tools.Tool hands over one opaque string, and models improvise even when given
-// a real schema. This normalises the shapes seen in practice:
-//
-//   - a plain JSON object                      -> used directly
-//   - an object wrapped in a ``` fence         -> fence stripped
-//   - a JSON object encoded inside a JSON      -> unwrapped, then re-parsed
-//     string (langchaingo's __arg1 round trip)
-//   - bare prose for a single-required-field   -> wrapped as {field: input}
-//     tool (e.g. a raw SQL statement)
-//
-// Anything else yields an error that quotes the expected schema, because an
-// agent that is told what went wrong can retry, whereas an opaque failure ends
-// the run.
+// ParseArgs normalises whatever the model produced into MCP tool arguments: plain JSON, fenced JSON, double-encoded JSON, or bare text for a single-required-field tool. Anything else errors with the expected schema quoted so the model can retry.
 func ParseArgs(input string, schema any) (map[string]any, error) {
 	trimmed := stripFence(input)
 
 	if trimmed == "" {
-		// A tool whose schema requires nothing is legitimately called with no
-		// arguments, and models signal that with "" or "{}".
+		// a tool requiring nothing is legitimately called with no arguments, signalled as "" or "{}"
 		if len(requiredFields(schema)) == 0 {
 			return map[string]any{}, nil
 		}
@@ -38,21 +22,17 @@ func ParseArgs(input string, schema any) (map[string]any, error) {
 		return args, nil
 	}
 
-	// A JSON string may itself hold the real object. This is exactly what
-	// happens when a model puts a JSON blob into langchaingo's __arg1 slot.
+	// a JSON string may hold the real object, which is what langchaingo's __arg1 round trip produces
 	var unquoted string
 	if err := json.Unmarshal([]byte(trimmed), &unquoted); err == nil {
 		if args, ok := decodeObject(stripFence(unquoted)); ok {
 			return args, nil
 		}
-		// The string held prose, not JSON. Fall through with the unwrapped
-		// text so the single-field shortcut below gets a clean value.
+		// the string held prose, not JSON; fall through with the unwrapped text
 		trimmed = strings.TrimSpace(unquoted)
 	}
 
-	// Unstructured text is only unambiguous when the tool wants exactly one
-	// thing. select_query(statement) and list_tables(database) both qualify,
-	// and both are tools this agent leans on.
+	// unstructured text is only unambiguous when the tool wants exactly one thing
 	if required := requiredFields(schema); len(required) == 1 {
 		return map[string]any{required[0]: trimmed}, nil
 	}
@@ -90,8 +70,7 @@ func decodeObject(s string) (map[string]any, bool) {
 	return out, true
 }
 
-// requiredFields reads the "required" list out of a JSON Schema. The schema
-// arrives as the server's raw JSON, so it is map-shaped rather than typed.
+// the "required" list out of a JSON Schema, map-shaped because it is the server's raw JSON
 func requiredFields(schema any) []string {
 	m, ok := schema.(map[string]any)
 	if !ok {
@@ -120,8 +99,7 @@ func argErr(reason, input string, schema any) error {
 	)
 }
 
-// renderSchema produces a compact one-line form of a JSON Schema for prompts
-// and error messages.
+// compact one-line form of a JSON Schema, for prompts and error messages
 func renderSchema(schema any) string {
 	if schema == nil {
 		return "{}"
