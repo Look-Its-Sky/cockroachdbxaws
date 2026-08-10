@@ -15,8 +15,7 @@ import (
 	"agent_space/utils/mcp/mcptest"
 )
 
-// scriptedModel returns pre-written responses in order, recording the message
-// history it was given. This exercises the loop's control flow without extra tokens
+// pre-written responses in order, exercising the loop's control flow without extra tokens
 type scriptedModel struct {
 	mu        sync.Mutex
 	responses []*llms.ContentResponse
@@ -40,11 +39,7 @@ func (m *scriptedModel) GenerateContent(_ context.Context, messages []llms.Messa
 	}
 
 	if m.calls > len(m.responses) {
-		// The runner may ask for more turns than a test scripts: up to
-		// MaxIterations, plus one more for summarise. Repeating the last
-		// response covers the overflow without an index panic, and it is how a
-		// model that never stops calling tools is expressed — script a single
-		// tool call and every subsequent turn requests it again.
+		// the runner may ask for more turns than a test scripts, up to MaxIterations plus summarise; repeating the last response is also how a model that never stops calling tools is expressed
 		return m.responses[len(m.responses)-1], nil
 	}
 	return m.responses[m.calls-1], nil
@@ -90,8 +85,7 @@ func (s stubStore) SimilaritySearch(_ context.Context, _ string, _ int, _ ...vec
 	return docs, nil
 }
 
-// newRunner wires a scripted model to real MCP tools served by the fake, so the
-// tool path is exercised end to end rather than mocked out.
+// a scripted model over real MCP tools, so the tool path runs end to end rather than mocked
 func newRunner(t *testing.T, model llms.Model, store vectorstores.VectorStore) (*Runner, *mcptest.Server) {
 	t.Helper()
 
@@ -133,8 +127,7 @@ func TestRunAnswersWithoutTools(t *testing.T) {
 		t.Errorf("called MCP tools when none were requested: %v", fake.Calls())
 	}
 
-	// The recalled incidents must actually reach the prompt, or the vector
-	// store is decorative.
+	// the recalled incidents must reach the prompt or the vector store is decorative
 	prompt := renderMessages(model.lastMsgs)
 	for _, want := range []string{"INC-412", "INC-388", "Checkout is 500ing"} {
 		if !strings.Contains(prompt, want) {
@@ -182,16 +175,14 @@ func TestRunExecutesToolCallThenAnswers(t *testing.T) {
 		t.Errorf("server received %+v, want one select_query", calls)
 	}
 
-	// The tool result has to be fed back with its tool_call_id, or the
-	// provider rejects the follow-up turn.
+	// the result must come back with its tool_call_id or the provider rejects the follow-up turn
 	if !hasToolResponse(model.lastMsgs, "call-1", "ran: SELECT count(*) FROM incidents") {
 		t.Errorf("tool result was not fed back to the model:\n%s", renderMessages(model.lastMsgs))
 	}
 }
 
 func TestRunFeedsBadArgumentsBackToModel(t *testing.T) {
-	// get_table_schema needs two fields, so this is genuinely unparseable and the
-	// model must be told why rather than the run aborting.
+	// get_table_schema needs two fields, so this is genuinely unparseable
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "get_table_schema", "tell me the columns"),
 		textResponse("ROLLBACK. The implicated commit is c7e1a09."),
@@ -223,10 +214,7 @@ func TestRunFeedsBadArgumentsBackToModel(t *testing.T) {
 }
 
 func TestRunRecordsToolLevelErrorAsFailedButContinues(t *testing.T) {
-	// A refused query is the server's answer, not a transport failure: the run
-	// carries on and the model reads the rejection. But the step is a failure,
-	// and the trace has to say so — a live run once made six calls against a
-	// database that did not exist and reported every one as a success.
+	// a refused query is the server's answer, not a transport failure; the run carries on but the step is still a failure and the trace has to say so
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "DROP TABLE incidents"}`),
 		textResponse("HOTFIX. The implicated commit is d4b8f31."),
@@ -244,8 +232,7 @@ func TestRunRecordsToolLevelErrorAsFailedButContinues(t *testing.T) {
 	if !res.Trace[0].Failed {
 		t.Error("a tool-level rejection was recorded as a successful step")
 	}
-	// Specifically a tool_error, not a transport one: the server answered, so
-	// the run must carry on rather than aborting as if the cluster were gone.
+	// tool_error, not transport: the server answered, so the run carries on
 	if got := res.Trace[0].Cause; got != CauseToolError {
 		t.Errorf("Cause = %q, want %q", got, CauseToolError)
 	}
@@ -286,8 +273,7 @@ func TestRunRejectsUnknownTool(t *testing.T) {
 }
 
 func TestRunStopsAtIterationCap(t *testing.T) {
-	// A model that never stops calling tools must be cut off with its findings
-	// intact rather than looping or returning nothing.
+	// a model that never stops must be cut off with its findings intact
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
 	}}
@@ -315,8 +301,7 @@ func TestRunStopsAtIterationCap(t *testing.T) {
 }
 
 func TestRunPassesRealSchemasToModel(t *testing.T) {
-	// The point of the native loop: the model receives each tool's actual JSON
-	// Schema, not langchaingo's flattened single-string stand-in.
+	// the point of the native loop: the model gets each tool's real schema, not a flattened stand-in
 	model := &scriptedModel{responses: []*llms.ContentResponse{textResponse("done")}}
 
 	runner, _ := newRunner(t, model, stubStore{})
@@ -329,8 +314,7 @@ func TestRunPassesRealSchemasToModel(t *testing.T) {
 		o(&opts)
 	}
 
-	// Derived from the session rather than hard-coded, so adding a fixture
-	// tool does not fail a test that is really about schema fidelity.
+	// derived from the session so adding a fixture tool does not fail a test about schema fidelity
 	if len(opts.Tools) != len(runner.Tools) {
 		t.Fatalf("model was given %d tools, want all %d", len(opts.Tools), len(runner.Tools))
 	}
@@ -339,8 +323,7 @@ func TestRunPassesRealSchemasToModel(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s parameters = %T, want the MCP schema", tool.Function.Name, tool.Function.Parameters)
 		}
-		// Every function must carry a properties object, even the no-argument
-		// one: LM Studio 400s the whole request if any of them omits it.
+		// every function needs a properties object, even the no-argument one, or LM Studio 400s the request
 		props, ok := params["properties"].(map[string]any)
 		if !ok {
 			t.Errorf("%s has no properties object: %v", tool.Function.Name, params)
@@ -356,11 +339,7 @@ func TestRunPassesRealSchemasToModel(t *testing.T) {
 }
 
 func TestRunAbortsOnTransportFailure(t *testing.T) {
-	// A dropped session is not something the model can fix by trying again, and
-	// every retry costs a full generate round trip. Before this was separated
-	// from a tool-level rejection, a dead session ran the loop to its cap and
-	// then reported "exceeded its step budget" — blaming the model for an
-	// outage, with nothing in the response naming the real cause.
+	// a dropped session cannot be fixed by retrying and each retry costs a full generate; before this was split out, a dead session ran to the cap and blamed the model's step budget
 	fake := mcptest.Start(t)
 	session, err := mcp.Connect(t.Context(), mcp.Config{URL: fake.URL, APIKey: "test-key"})
 	if err != nil {
@@ -389,8 +368,7 @@ func TestRunAbortsOnTransportFailure(t *testing.T) {
 	if len(res.Trace) != 1 {
 		t.Fatalf("Trace has %d steps, want 1", len(res.Trace))
 	}
-	// The partial trace still comes back — it is the evidence of how far the
-	// investigation got before the cluster went away.
+	// the partial trace still comes back, as evidence of how far the run got
 	if step := res.Trace[0]; !step.Failed || step.Cause != CauseTransport {
 		t.Errorf("step = %+v, want a failed step caused by %q", step, CauseTransport)
 	}
@@ -400,11 +378,7 @@ func TestRunAbortsOnTransportFailure(t *testing.T) {
 }
 
 func TestRunContinuesWhenTheServerRejectsOneCall(t *testing.T) {
-	// The Cloud server refuses a blocked schema with a protocol error rather
-	// than a result carrying isError. That looks identical to a dead session at
-	// the call site, and treating it as one abandoned a live run that was two
-	// good tool calls in and one query away from an answer. It is a verdict on
-	// the query, not on the connection, so the model gets to try again.
+	// a blocked schema comes back as a protocol error, identical to a dead session at the call site; treating it as one abandoned a live run one query from an answer
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query",
 			`{"query": "SELECT table_name FROM information_schema.tables"}`),
@@ -431,17 +405,14 @@ func TestRunContinuesWhenTheServerRejectsOneCall(t *testing.T) {
 	if res.Answer != "ROLLBACK. The implicated commit is a91f3c2." {
 		t.Errorf("Answer = %q, want the run to continue past the rejection", res.Answer)
 	}
-	// It really did reach the server — this is a rejection, not a client-side
-	// argument failure that never left the process.
+	// it really reached the server, so this is a rejection and not a client-side argument failure
 	if calls := fake.Calls(); len(calls) != 1 {
 		t.Errorf("server received %+v, want the one rejected call", calls)
 	}
 }
 
 func TestSummariseWithholdsTools(t *testing.T) {
-	// summarise exists to force a model stuck in a tool loop to commit to a
-	// decision. Offering it tools again would let it keep looping, so the final
-	// call must carry none.
+	// summarise forces a looping model to commit, so the final call must carry no tools
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
 	}}
@@ -457,8 +428,7 @@ func TestSummariseWithholdsTools(t *testing.T) {
 		t.Fatal("Truncated = false, want the run to have reached summarise")
 	}
 
-	// The scripted model never stops calling tools, so the last call it saw is
-	// necessarily the summarise one.
+	// the scripted model never stops calling tools, so the last call it saw is the summarise one
 	var opts llms.CallOptions
 	for _, o := range model.lastOpts {
 		o(&opts)
@@ -533,8 +503,7 @@ func TestInstructionsCarrySchemaAndTellTheModelToSkipDiscovery(t *testing.T) {
 	if !strings.Contains(got, "CREATE TABLE deploys") {
 		t.Errorf("the schema never reached the prompt:\n%s", got)
 	}
-	// Handing over the schema without saying so leaves the model free to go on
-	// calling the discovery tools anyway, which is the whole cost being removed.
+	// handing over the schema without saying so leaves the model free to keep calling the discovery tools
 	for _, want := range []string{"list_tables", "get_table_schema", "do NOT need"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt does not tell the model to skip discovery (missing %q)", want)
@@ -543,21 +512,22 @@ func TestInstructionsCarrySchemaAndTellTheModelToSkipDiscovery(t *testing.T) {
 }
 
 func TestInstructionsAreUnchangedWithoutASchema(t *testing.T) {
-	// A cluster that could not be described at boot must leave behaviour
-	// exactly as it was, not append an empty and confusing section.
+	// a cluster that could not be described must leave behaviour exactly as it was
 	runner, _ := newRunner(t, &scriptedModel{responses: []*llms.ContentResponse{textResponse("x")}}, stubStore{})
 	runner.Schema = "   "
 
-	if got := runner.instructions(); got != systemPrompt {
+	// the verdict block is asked for on every path, schema or not; what must
+	// not appear is any description of tables that could not be read
+	if got := runner.instructions(); got != systemPrompt+verdictInstruction {
 		t.Errorf("instructions changed with an empty schema:\n%s", got)
+	}
+	if strings.Contains(runner.instructions(), "The live cluster's application tables") {
+		t.Error("a schema block leaked into the prompt with no schema loaded")
 	}
 }
 
 func TestRunReportsNotTruncatedWhenTheModelAnswers(t *testing.T) {
-	// The counterpart to TestRunStopsAtIterationCap. Truncated is the flag that
-	// says "this answer came from the fallback, not from the model deciding it
-	// was done" — so the false case has to be pinned too, or the field only
-	// ever proves one of the two things it exists to distinguish.
+	// the counterpart to TestRunStopsAtIterationCap; the false case has to be pinned or the flag only proves one of the two things it distinguishes
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "SELECT 1"}`),
 		textResponse("ROLLBACK. The implicated commit is a91f3c2."),

@@ -1,24 +1,4 @@
-// Command seed applies a .sql file to the database named by DATABASE_URL.
-//
-// It exists because scripts/seed-cluster.sql had exactly one documented way to
-// run it — `docker exec … cockroach sql` — which needs both a container runtime
-// and a local cluster. Neither is available when the target is CockroachDB
-// Cloud, which is precisely where the demo data has to end up.
-//
-// The seed matters more than it sounds. On a cluster with no application
-// tables the agent invents plausible ones, every tool call fails, and it
-// quietly answers from the vector store alone — a system that looks grounded
-// and is not.
-//
-// Like cmd/nuke it talks to the database directly, so it needs no embedder and
-// therefore no LLM credentials.
-//
-// Usage:
-//
-//	go run ./cmd/seed                       # scripts/seed-cluster.sql, with a prompt
-//	go run ./cmd/seed -yes                  # unattended
-//	go run ./cmd/seed -file=other.sql       # a different script
-//	go run ./cmd/seed -database-url=...     # override the target
+// Command seed applies a .sql file to DATABASE_URL, so seed-cluster.sql can reach CockroachDB Cloud without docker.
 package main
 
 import (
@@ -65,8 +45,7 @@ func main() {
 		fail(errors.New("DATABASE_URL is not set in the environment or .env file"))
 	}
 
-	// The seed script starts with DROP TABLE, so show the target before doing
-	// it rather than after, exactly as cmd/nuke does.
+	// the script starts with DROP TABLE, so show the target before doing it
 	fmt.Printf("target:  %s\n", utils.RedactURL(connStr))
 	fmt.Printf("file:    %s (%d bytes)\n", path, len(sql))
 	fmt.Printf("note:    this DROPs and recreates the tables the script names\n\n")
@@ -89,8 +68,7 @@ func run(ctx context.Context, connStr, sql string) error {
 	if err != nil {
 		return fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
-	// The extended protocol permits one statement per Exec. Safe to relax here
-	// because the SQL comes from a file on disk, not from input.
+	// safe to relax: the SQL comes from a file on disk, not from input
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	conn, err := pgx.ConnectConfig(ctx, cfg)
@@ -99,12 +77,7 @@ func run(ctx context.Context, connStr, sql string) error {
 	}
 	defer conn.Close(ctx)
 
-	// One statement per Exec rather than the whole file at once. Sending the
-	// batch together puts every statement in a single implicit transaction,
-	// and CockroachDB refuses to drop and recreate the same table inside one:
-	//     ERROR: table "request_latency" is being added (SQLSTATE 55000)
-	// Executed separately, each DDL statement commits before the next is
-	// parsed, which is what the file assumes.
+	// one statement per Exec; batched they share an implicit transaction and CockroachDB will not drop and recreate a table inside one
 	statements := splitStatements(sql)
 	if len(statements) == 0 {
 		return errors.New("no SQL statements found in the file")
@@ -121,16 +94,13 @@ func run(ctx context.Context, connStr, sql string) error {
 	return nil
 }
 
-// splitStatements breaks a SQL file on top-level semicolons, ignoring those
-// inside string literals and -- comments. It is deliberately small: it handles
-// the seed scripts in this repo, not arbitrary SQL with dollar-quoting.
+// split on top-level semicolons, ignoring string literals and -- comments; handles this repo's scripts, not arbitrary SQL
 func splitStatements(sql string) []string {
 	var (
-		out        []string
-		current    strings.Builder
-		inString   bool
-		inComment  bool
-		prevIsQuot bool
+		out       []string
+		current   strings.Builder
+		inString  bool
+		inComment bool
 	)
 
 	for i := 0; i < len(sql); i++ {
@@ -151,18 +121,19 @@ func splitStatements(sql string) []string {
 		}
 
 		if c == '\'' {
-			// '' inside a string is an escaped quote, not a terminator.
-			if inString && prevIsQuot {
-				prevIsQuot = false
-				current.WriteByte(c)
+			// '' inside a string is an escaped quote, not a terminator. Decided
+			// by looking ahead rather than by remembering the previous
+			// character: the latter cannot tell an escaped quote from the empty
+			// literal '', and would leave the splitter stuck inside a string.
+			if inString && i+1 < len(sql) && sql[i+1] == '\'' {
+				current.WriteString("''")
+				i++
 				continue
 			}
 			inString = !inString
-			prevIsQuot = inString
 			current.WriteByte(c)
 			continue
 		}
-		prevIsQuot = false
 
 		if c == ';' && !inString {
 			if s := strings.TrimSpace(current.String()); s != "" {
@@ -190,8 +161,7 @@ func firstLine(stmt string) string {
 	return line
 }
 
-// summarise reports what landed, so a silent success is distinguishable from a
-// script that parsed but seeded nothing.
+// report what landed, so a silent success is distinguishable from seeding nothing
 func summarise(ctx context.Context, conn *pgx.Conn) {
 	rows, err := conn.Query(ctx, `
 		SELECT table_name
@@ -225,8 +195,7 @@ func summarise(ctx context.Context, conn *pgx.Conn) {
 	}
 }
 
-// defaultSeedPath finds scripts/seed-cluster.sql relative to the working
-// directory, so `go run ./cmd/seed` works from the module root without flags.
+// find scripts/seed-cluster.sql relative to the working directory so no flag is needed
 func defaultSeedPath() string {
 	candidates := []string{
 		filepath.Join("scripts", "seed-cluster.sql"),

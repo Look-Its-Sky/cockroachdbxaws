@@ -5,12 +5,7 @@ import (
 	"time"
 )
 
-// Cause classifies a failed step. Failed alone cannot distinguish a model that
-// guessed at a table name from an MCP server that has fallen over, and those
-// call for opposite responses: the first is the agent working as intended and
-// correcting itself, the second is an outage that no amount of retrying fixes.
-// A trace that shows six failures without saying which kind hides exactly the
-// thing the trace exists to reveal.
+// why a step failed; failed alone cannot tell a model's bad guess from an outage
 type Cause string
 
 const (
@@ -18,39 +13,20 @@ const (
 	CauseMalformedCall Cause = "malformed_call"
 	// CauseUnknownTool is a call naming a tool that was never offered.
 	CauseUnknownTool Cause = "unknown_tool"
-	// CauseInvalidArguments is arguments that could not be parsed against the
-	// tool's schema, so nothing was sent to the server.
+	// arguments that did not parse against the schema, so nothing was sent
 	CauseInvalidArguments Cause = "invalid_arguments"
-	// CauseToolError is the server running the tool and rejecting the call —
-	// a refused query, a missing table. Recoverable: the model reads why.
+	// the server ran the tool and rejected the call, recoverable
 	CauseToolError Cause = "tool_error"
-	// CauseRejected is the server refusing to run the tool at all: a blocked
-	// schema, an argument it will not accept. It arrives as a protocol error
-	// rather than a result, but it is a verdict on this one call and nothing
-	// more, so it is recoverable in exactly the way CauseToolError is — the
-	// model reads the reason and asks a different question.
+	// the server refused to run the tool at all, a verdict on this call only, recoverable
 	CauseRejected Cause = "rejected"
-	// CauseTransport is the call failing before the tool ever ran: a dropped
-	// session, a protocol-level rejection, a cancelled context. In practice
-	// the most common one is configuration — an API key whose service account
-	// has no access to the cluster is refused at the protocol layer, not by
-	// the tool. None of these are recoverable by the model.
+	// the call never reached the tool: dropped session, protocol rejection, cancelled context
 	CauseTransport Cause = "transport"
 )
 
-// ErrTransport reports that an MCP call failed before the tool ran, as opposed
-// to a tool running and declining. Callers use it to answer "can we reach the
-// cluster at all" rather than surfacing an outage as a generic run failure.
-//
-// The wording avoids "transport failed": the identical code path covers a
-// dropped connection and a credential that is merely unauthorised, and calling
-// the latter a transport failure sends the reader looking for a network
-// problem that is not there.
+// an MCP call failed before the tool ran, as opposed to a tool running and declining
 var ErrTransport = errors.New("agent: MCP call failed before the tool ran")
 
-// Step records one tool invocation. The trace is what makes an agent run
-// legible: it shows which CockroachDB tool was consulted, with what arguments,
-// and what came back, so a decision can be audited rather than taken on faith.
+// one tool invocation, so a decision can be audited rather than taken on faith
 type Step struct {
 	Iteration  int            `json:"iteration"`
 	Tool       string         `json:"tool"`
@@ -65,12 +41,21 @@ type Step struct {
 
 // Result is a completed agent run.
 type Result struct {
-	Answer     string   `json:"answer"`
+	Answer string `json:"answer"`
+	// the same decision as Answer, in a form the remediation pipeline can
+	// branch on without reading English
+	Verdict    Verdict  `json:"verdict"`
 	Sources    int      `json:"sources"`
 	Iterations int      `json:"iterations"`
 	Trace      []Step   `json:"trace"`
 	Grounding  []string `json:"grounding,omitempty"`
 	Truncated  bool     `json:"truncated"`
+}
+
+// record the model's answer, splitting the machine-readable verdict off the
+// prose so a human never reads a JSON block and automation never parses English
+func (r *Result) setAnswer(raw string) {
+	r.Verdict, r.Answer = parseVerdict(raw)
 }
 
 func elapsedMS(start time.Time) int64 {

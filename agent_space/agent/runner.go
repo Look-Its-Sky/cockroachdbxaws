@@ -58,9 +58,7 @@ type Runner struct {
 	Tools         []*mcp.Tool
 	MaxIterations int
 
-	// Schema is the cluster's application tables, read once at boot by
-	// LoadClusterSchema. Empty is valid and means the model discovers the
-	// schema itself, at a cost of roughly four tool calls per run.
+	// tables read at boot, empty means the model discovers them itself
 	Schema string
 
 	specs  []llms.Tool
@@ -78,10 +76,7 @@ func New(model llms.Model, store vectorstores.VectorStore, tools []*mcp.Tool) *R
 	}
 }
 
-// init builds the tool specs once. Each tool's real JSON Schema is passed
-// straight through to the model — this is the whole reason for the native loop
-// rather than langchaingo's agent, which flattens every tool to one string
-// argument and leaves the model guessing at the shape.
+// build tool specs once, passing each tool's real JSON Schema to the model
 func (r *Runner) init() {
 	r.once.Do(func() {
 		r.byName = make(map[string]*mcp.Tool, len(r.Tools))
@@ -144,26 +139,22 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 		choice := resp.Choices[0]
 		calls := toolCalls(choice)
 		if len(calls) == 0 {
-			result.Answer = strings.TrimSpace(choice.Content)
-			if result.Answer == "" {
-				// A reasoning model that spends its whole budget thinking
-				// returns empty content; say so rather than returning "".
-				result.Answer = "The model returned no answer (stop reason: " + choice.StopReason + ")."
+			answer := strings.TrimSpace(choice.Content)
+			if answer == "" {
+				// reasoning models can spend the whole budget thinking and return nothing
+				answer = "The model returned no answer (stop reason: " + choice.StopReason + ")."
 			}
+			result.setAnswer(answer)
 			return result, nil
 		}
 
-		// Echo the assistant's tool-call turn back, or the follow-up messages
-		// have nothing to attach their tool_call_id to.
+		// echo the tool-call turn back or the results have no tool_call_id to attach to
 		messages = append(messages, assistantTurn(choice, calls))
 
 		steps, err := r.execute(ctx, i, calls)
 		result.Trace = append(result.Trace, steps...)
 		if err != nil {
-			// The cluster is unreachable, so there is nothing left to inspect
-			// and no answer worth giving. Return the trace with the error: it
-			// shows what was gathered before the session dropped, and it names
-			// the outage instead of blaming the model's step budget for it.
+			// cluster is gone, return the trace with the error rather than a partial answer
 			return result, err
 		}
 		for j, step := range steps {
@@ -178,23 +169,16 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 		}
 	}
 
-	// Out of iterations. Return the trace and a partial answer rather than an
-	// opaque failure — a half-finished investigation is still evidence.
+	// out of iterations, a half-finished investigation is still evidence
 	result.Truncated = true
-	result.Answer = r.summarise(ctx, messages)
+	result.setAnswer(r.summarise(ctx, messages))
 	return result, nil
 }
 
-// instructions returns the system prompt, with the cluster's schema appended
-// when one was read at boot.
-//
-// Handing the model the schema is what makes "two or three well-chosen
-// queries" achievable rather than merely instructed: without it, two or three
-// of the queries are spent finding out which tables exist, and the budget is
-// gone before the question is asked.
+// system prompt plus the schema read at boot, so queries are not spent finding tables
 func (r *Runner) instructions() string {
 	if strings.TrimSpace(r.Schema) == "" {
-		return systemPrompt
+		return systemPrompt + verdictInstruction
 	}
 
 	return systemPrompt + `
@@ -205,7 +189,7 @@ get_table_schema to find them. Go straight to the SELECT that answers the
 question. Only fall back to those tools if something you need is genuinely
 missing here.
 
-` + r.Schema
+` + r.Schema + verdictInstruction
 }
 
 // recall pulls the most similar past incidents out of the vector index.
@@ -226,12 +210,7 @@ func (r *Runner) recall(ctx context.Context, question string, limit int) ([]stri
 	return grounding, nil
 }
 
-// execute runs the requested tool calls, concurrently when there is more than
-// one, preserving the order the model asked for so tool_call_ids line up.
-//
-// The returned error is the first transport failure in call order, if any. It
-// is reported separately from the steps because it is the one failure the model
-// cannot be asked to work around.
+// run the calls concurrently, keeping order so tool_call_ids line up; the error is the first transport failure
 func (r *Runner) execute(ctx context.Context, iteration int, calls []llms.ToolCall) ([]Step, error) {
 	steps := make([]Step, len(calls))
 	errs := make([]error, len(calls))
@@ -246,8 +225,7 @@ func (r *Runner) execute(ctx context.Context, iteration int, calls []llms.ToolCa
 	}
 	wg.Wait()
 
-	// Ordered rather than first-to-fail, so a run aborts on the same call every
-	// time regardless of how the goroutines interleaved.
+	// ordered rather than first-to-fail so a run aborts on the same call every time
 	for _, err := range errs {
 		if err != nil {
 			return steps, err
@@ -256,15 +234,7 @@ func (r *Runner) execute(ctx context.Context, iteration int, calls []llms.ToolCa
 	return steps, nil
 }
 
-// invoke runs one tool call. Bad arguments and tool-level rejections come back
-// as Step.Output text rather than errors, because the model reads that text and
-// retries.
-//
-// A transport failure is returned as an error instead. The distinction is the
-// one utils/mcp already draws — InvokeResult errors only when the call never
-// reached the server — and it has to be preserved here, because retrying a
-// dropped session costs a full model round trip per attempt and cannot
-// possibly succeed.
+// bad arguments and rejections come back as text the model reads; only a dead session errors
 func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) (Step, error) {
 	start := time.Now()
 	step := Step{Iteration: iteration}
@@ -298,23 +268,16 @@ func (r *Runner) invoke(ctx context.Context, iteration int, call llms.ToolCall) 
 
 	res, err := tool.InvokeResult(ctx, args)
 	if err != nil {
-		// Not every returned error is fatal. The server rejects a call it will
-		// not run — a blocked schema, an argument it dislikes — with a protocol
-		// error rather than a result, and the model recovers from those by
-		// asking differently. Only a dead session ends the run.
+		// a rejected call is a verdict on that call, not the session, so keep going
 		if !mcp.IsSessionFailure(err) {
 			return fail(CauseRejected, "Tool call rejected: "+err.Error())
 		}
-		// The step is still recorded, so the trace shows how far the run got
-		// before the session dropped, but the run itself stops.
+		// record the step so the trace shows how far the run got, then stop
 		s, _ := fail(CauseTransport, "Tool call failed: "+err.Error())
 		return s, fmt.Errorf("%w: %w", ErrTransport, err)
 	}
 
-	// A tool that ran and rejected the call is still a failed step. The model
-	// gets the text either way, but a trace that calls this a success hides
-	// exactly the pattern worth seeing — six calls against a database that does
-	// not exist read as a clean run otherwise.
+	// a tool that ran and said no is still a failed step, or the trace hides the pattern
 	if res.IsError {
 		return fail(CauseToolError, clip(res.Text, maxToolOutputChars))
 	}
@@ -332,8 +295,7 @@ func (r *Runner) names() []string {
 	return names
 }
 
-// summarise asks for a final answer with tools withheld, so a model stuck in a
-// tool loop is forced to commit to a decision.
+// final answer with tools withheld, so a model stuck in a loop has to decide
 func (r *Runner) summarise(ctx context.Context, messages []llms.MessageContent) string {
 	messages = append(messages, llms.TextParts(llms.ChatMessageTypeHuman,
 		"You have run out of investigation steps. Using only what you have gathered, state your ROLLBACK or HOTFIX decision and the implicated commit now. Do not call any more tools."))
@@ -350,8 +312,7 @@ func (r *Runner) summarise(ctx context.Context, messages []llms.MessageContent) 
 	return answer
 }
 
-// toolCalls normalises the two shapes providers use: the modern tool_calls
-// array and the legacy single function_call.
+// normalise the two shapes providers use: tool_calls and the legacy function_call
 func toolCalls(choice *llms.ContentChoice) []llms.ToolCall {
 	if len(choice.ToolCalls) > 0 {
 		return choice.ToolCalls

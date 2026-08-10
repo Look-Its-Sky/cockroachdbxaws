@@ -68,6 +68,32 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── SQS, so the worker has a queue to poll ─────────────────────────────────
+  # The init script creates static-log-analysis and its dead-letter queue. The
+  # resulting URL matches the ARN the real producer sends, because LocalStack
+  # uses account 000000000000:
+  #   SQS_QUEUE_URL=http://localhost:4566/000000000000/static-log-analysis
+  #   AWS_ENDPOINT_URL=http://localhost:4566
+  #
+  # Credentials are still required by the SDK's signing, but not checked:
+  # AWS_ACCESS_KEY_ID=test and AWS_SECRET_ACCESS_KEY=test are enough.
+  localstack:
+    image: localstack/localstack:4
+    environment:
+      SERVICES: sqs
+      DEBUG: "0"
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./docker/localstack-init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
   # ── opt-in: PostgreSQL + pgvector ──────────────────────────────────────────
   postgres:
     profiles: ["pg"]
