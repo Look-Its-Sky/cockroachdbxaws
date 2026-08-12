@@ -209,6 +209,9 @@ outage is; from the data's side nothing happened at all, which is what makes
 | `outbox.TestAMessageScopedToAnotherRegionIsNeverPublishedAndNeverDeadLettered` | fast |
 | `identity.TestCloudWatchV1DoesNotCollideAcrossAMovedComponentBoundary` | fast |
 | `incident.TestIdleFamilyIsCompactedAfterItsRetentionHorizonPasses` | fast |
+| `persistence.TestSingleRegionTopologyClassificationRejectsCrossRegionShapes` | fast |
+| `persistence.TestMigrationAcceptsDatabaseAssignedExactlyOneCockroachRegion` | integration |
+| `persistence.TestMigrationTemporarilyUnlocksManagedTablesAndRestoresTheLock` | integration |
 
 **Gap:** *retention* here means in-memory engine-state retention. Durable
 retention and compaction of persisted payloads, and the audit-event subsystem
@@ -308,3 +311,10 @@ generic ingress contract, but the specific Flagd scenarios remain outstanding.
 The service-local EC2 Compose package and regional AWS Terraform module are
 also validated in the fast gate. The AWS deployment runs the combined
 `cloudwatch` role and does not enable the unresolved split-role path.
+
+An optional Next.js operations dashboard now consumes a bounded, content-free
+`/overviewz` projection, worker metrics/readiness, and read-only SQS queue
+attributes. Authentication fails closed through a Better Auth session backed
+by EC2-local SQLite plus an explicit `admin` role; public sign-up is disabled.
+The dashboard is disabled by default and cannot block the log-processing
+Compose profile when its authentication configuration is absent.

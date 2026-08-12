@@ -6,7 +6,7 @@ x-service: &service
     context: /opt/static-log-analysis/repository/services/static-log-analysis
     dockerfile: Dockerfile
   environment:
-    STATIC_LOG_ANALYSIS_DATABASE_DSN: ${STATIC_LOG_ANALYSIS_DATABASE_DSN:?database DSN was not loaded from SSM}
+    STATIC_LOG_ANALYSIS_DATABASE_DSN: ${STATIC_LOG_ANALYSIS_DATABASE_DSN:?database DSN was not loaded from secrets.env}
     AWS_REGION: ${SLA_REGION:?AWS region is required}
   restart: unless-stopped
 
@@ -15,10 +15,11 @@ services:
     image: alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
-    command: ["chown -R 10001:10001 /journal /checkpoints"]
+    command: ["chown -R 10001:10001 /journal /checkpoints /dashboard-auth"]
     volumes:
       - analysis-journal:/journal
       - cloudwatch-checkpoints:/checkpoints
+      - dashboard-auth:/dashboard-auth
     restart: "no"
 
   migrate:
@@ -85,6 +86,96 @@ services:
       start_period: 10s
     stop_grace_period: 60s
 
+  dashboard:
+    image: static-log-analysis-dashboard:hackathon
+    build:
+      context: /opt/static-log-analysis/repository/services/dashboard
+      dockerfile: Dockerfile
+    profiles: ["dashboard"]
+    environment:
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      BETTER_AUTH_URL: https://${SLA_DASHBOARD_HOSTNAME:-localhost}
+      BETTER_AUTH_DATABASE_PATH: /var/lib/dashboard-auth/auth.sqlite
+      AWS_REGION: ${SLA_REGION:?AWS region is required}
+      SLA_OUTBOX_QUEUE_URL: ${SLA_OUTBOX_QUEUE_URL:?assignment queue is required}
+      SLA_OUTBOX_DEAD_LETTER_QUEUE_URL: ${SLA_OUTBOX_DEAD_LETTER_QUEUE_URL:?dead-letter queue is required}
+      ANALYSIS_OVERVIEW_URL: http://cloudwatch:9464/overviewz
+      CLOUDWATCH_HEALTH_URL: http://cloudwatch:9464/readyz
+      CLOUDWATCH_METRICS_URL: http://cloudwatch:9464/metrics
+      OUTBOX_HEALTH_URL: http://outbox:9464/readyz
+    depends_on:
+      cloudwatch:
+        condition: service_healthy
+      outbox:
+        condition: service_healthy
+      dashboard-auth-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    volumes:
+      - dashboard-auth:/var/lib/dashboard-auth
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/sign-in"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  dashboard-auth-migrate:
+    image: static-log-analysis-dashboard-admin:hackathon
+    build:
+      context: /opt/static-log-analysis/repository/services/dashboard
+      dockerfile: Dockerfile
+      target: admin
+    profiles: ["dashboard"]
+    command: ["npm", "run", "auth:migrate"]
+    environment:
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      BETTER_AUTH_URL: https://${SLA_DASHBOARD_HOSTNAME:-localhost}
+      BETTER_AUTH_DATABASE_PATH: /var/lib/dashboard-auth/auth.sqlite
+    volumes:
+      - dashboard-auth:/var/lib/dashboard-auth
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  dashboard-create-admin:
+    image: static-log-analysis-dashboard-admin:hackathon
+    build:
+      context: /opt/static-log-analysis/repository/services/dashboard
+      dockerfile: Dockerfile
+      target: admin
+    profiles: ["dashboard-admin"]
+    command: ["npm", "run", "auth:create-admin"]
+    environment:
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      BETTER_AUTH_URL: https://${SLA_DASHBOARD_HOSTNAME:-localhost}
+      BETTER_AUTH_DATABASE_PATH: /var/lib/dashboard-auth/auth.sqlite
+    volumes:
+      - dashboard-auth:/var/lib/dashboard-auth
+    restart: "no"
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    profiles: ["dashboard"]
+    environment:
+      SLA_DASHBOARD_HOSTNAME: ${SLA_DASHBOARD_HOSTNAME:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   analysis-journal:
   cloudwatch-checkpoints:
+  caddy-data:
+  caddy-config:
+  dashboard-auth:

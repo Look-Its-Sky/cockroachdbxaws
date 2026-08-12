@@ -130,9 +130,29 @@ func TestSingleRegionTopologyMustBeExplicitAndDatabaseHasNoMultiRegionConfigurat
 	}
 }
 
-func TestMigrationRejectsDatabaseWithRealCockroachMultiRegionMetadata(t *testing.T) {
+func TestMigrationAcceptsDatabaseAssignedExactlyOneCockroachRegion(t *testing.T) {
 	ctx := context.Background()
-	container, err := cockroachdb.Run(ctx, crdbtest.PinnedImage,
+	pool := oneRegionManagedPool(t)
+	compatible, err := verifySingleRegionTopology(ctx, pool)
+	if err != nil || !compatible {
+		t.Fatalf("one-region managed database rejected: compatible=%v err=%v", compatible, err)
+	}
+	if err := ApplyMigrations(ctx, pool, TopologySingleRegion); err != nil {
+		t.Fatalf("migrate one-region managed database: %v", err)
+	}
+	var migrationTable bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='schema_migrations')`).Scan(&migrationTable); err != nil {
+		t.Fatal(err)
+	}
+	if !migrationTable {
+		t.Fatal("migration did not create its ledger")
+	}
+}
+
+func oneRegionManagedPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+	container, err := cockroachdb.Run(ctx, crdbtest.Image(),
 		cockroachdb.WithInsecure(), testcontainers.WithCmdArgs("--locality=region=us-east-1"))
 	if err != nil {
 		if os.Getenv("REQUIRE_DOCKER") == "1" {
@@ -169,20 +189,76 @@ func TestMigrationRejectsDatabaseWithRealCockroachMultiRegionMetadata(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
-	compatible, err := verifySingleRegionTopology(ctx, pool)
-	if err != nil || compatible {
-		t.Fatalf("real multi-region metadata not detected: compatible=%v err=%v", compatible, err)
-	}
-	if err := ApplyMigrations(ctx, pool, TopologySingleRegion); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("migration accepted real multi-region database: %v", err)
-	}
-	var migrationTable bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='schema_migrations')`).Scan(&migrationTable); err != nil {
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func TestMigrationTemporarilyUnlocksManagedTablesAndRestoresTheLock(t *testing.T) {
+	pool := oneRegionManagedPool(t)
+	ctx := context.Background()
+	loaded, err := loadMigrations()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if migrationTable {
-		t.Fatal("topology rejection happened after migration mutation")
+	if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (
+		version INT8 PRIMARY KEY,
+		name STRING NOT NULL,
+		checksum BYTES NOT NULL,
+		catalog_checksum BYTES NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range splitMigration(loaded[0].sql) {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)`,
+		loaded[0].version, loaded[0].name, loaded[0].checksum[:]); err != nil {
+		t.Fatal(err)
+	}
+	for table := range requiredSchema {
+		if _, err := pool.Exec(ctx, `ALTER TABLE `+fmt.Sprintf(`%q`, table)+` SET (schema_locked=true)`); err != nil {
+			t.Fatalf("lock %s: %v", table, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `SET CLUSTER SETTING sql.schema.auto_unlock.enabled = false`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ApplyMigrations(ctx, pool, TopologySingleRegion); err != nil {
+		checksum, checksumErr := liveCatalogChecksum(ctx, pool)
+		t.Fatalf("resume migration with a locked table: %v (catalog checksum=%x, checksum error=%v)", err, checksum, checksumErr)
+	}
+	var name, createStatement string
+	if err := pool.QueryRow(ctx, `SHOW CREATE TABLE occurrences`).Scan(&name, &createStatement); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(createStatement, "schema_locked = true") {
+		t.Fatalf("migration did not restore schema lock:\n%s", createStatement)
+	}
+	var secondVersion bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=2)`).Scan(&secondVersion); err != nil {
+		t.Fatal(err)
+	}
+	if !secondVersion {
+		t.Fatal("second migration was not recorded")
+	}
+
+	if _, err := pool.Exec(ctx, `ALTER TABLE occurrences SET (schema_locked=false)`); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := restoreTableLocks(cancelled, pool, []string{"occurrences"}); err != nil {
+		t.Fatalf("restore lock after migration cancellation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SHOW CREATE TABLE occurrences`).Scan(&name, &createStatement); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(createStatement, "schema_locked = true") {
+		t.Fatal("cancelled migration cleanup left the table unlocked")
 	}
 }
 
@@ -444,6 +520,28 @@ func TestConcurrentDistinctEpisodesReconstructGenerationNumbersIndependentOfLock
 	}
 	if !reflect.DeepEqual(seenGenerations, wantGenerations) {
 		t.Fatalf("records_seen did not retain immutable generation identities: want %v got %v", wantGenerations, seenGenerations)
+	}
+}
+
+func TestDashboardOverviewIsBoundedToSafeOperationalMetadata(t *testing.T) {
+	store, _ := integrationStore(t)
+	input := preparedInput(t, testids.New(), builders.NewFactory().Record(t), true)
+	if _, err := store.Process(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+
+	overview, err := store.Overview(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.RecordsSeen != 1 || overview.IncidentFamilies != 1 || overview.Investigations["queued"] != 1 ||
+		overview.Outbox["pending"] != 1 || len(overview.Recent) != 1 {
+		t.Fatalf("unexpected overview: %+v", overview)
+	}
+	item := overview.Recent[0]
+	if item.InvestigationID != input.Investigation.InvestigationID || item.Service != input.Record.Service.Name ||
+		item.Environment != input.Record.Service.Environment || item.TriggerReason != "five_in_five" {
+		t.Fatalf("unexpected recent investigation: %+v", item)
 	}
 }
 

@@ -46,6 +46,84 @@ variable "instance_type" {
   default     = "t3.small"
 }
 
+variable "deploy_demo" {
+  description = "Create a separate public OpenTelemetry Demo host and a watched CloudWatch payment-service log group."
+  type        = bool
+  default     = false
+}
+
+variable "dashboard_enabled" {
+  description = "Expose the authenticated operations dashboard through HTTPS on the analysis host."
+  type        = bool
+  default     = false
+}
+
+variable "dashboard_hostname" {
+  description = "Public DNS hostname whose A record points to instance_public_ip. Required when dashboard_enabled is true."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = !var.dashboard_enabled || can(regex(
+      "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$",
+      var.dashboard_hostname
+    ))
+    error_message = "dashboard_hostname must be a valid DNS hostname when the dashboard is enabled."
+  }
+}
+
+variable "dashboard_ingress_cidr" {
+  description = "CIDR allowed to reach the authenticated dashboard on ports 80 and 443. Use 0.0.0.0/0 for public internet access."
+  type        = string
+  default     = "0.0.0.0/0"
+
+  validation {
+    condition     = can(cidrhost(var.dashboard_ingress_cidr, 0))
+    error_message = "dashboard_ingress_cidr must be a valid CIDR."
+  }
+}
+
+variable "demo_instance_type" {
+  description = "EC2 size for the optional OpenTelemetry Demo host."
+  type        = string
+  default     = "t3.large"
+}
+
+variable "demo_ingress_cidr" {
+  description = "Single operator CIDR allowed to reach the optional demo frontend on port 8080."
+  type        = string
+  default     = "127.0.0.1/32"
+
+  validation {
+    condition = (can(cidrhost(var.demo_ingress_cidr, 0)) &&
+      var.demo_ingress_cidr != "0.0.0.0/0" &&
+    var.demo_ingress_cidr != "::/0")
+    error_message = "demo_ingress_cidr must be a valid CIDR and cannot allow the entire internet."
+  }
+}
+
+variable "demo_repository_ref" {
+  description = "Immutable OpenTelemetry Demo commit deployed to the optional demo host."
+  type        = string
+  default     = "2e72d8bcdf754603e956406808630bc9663c992c"
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{40}$", var.demo_repository_ref))
+    error_message = "demo_repository_ref must be a full lowercase Git commit SHA."
+  }
+}
+
+variable "demo_version" {
+  description = "Immutable OpenTelemetry Demo container release used instead of mutable latest tags."
+  type        = string
+  default     = "3.0.0"
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.demo_version))
+    error_message = "demo_version must be a numeric MAJOR.MINOR.PATCH release."
+  }
+}
+
 variable "root_volume_gib" {
   description = "Encrypted gp3 root disk containing Docker volumes, the journal, and checkpoints."
   type        = number
@@ -79,23 +157,6 @@ variable "repository_ref" {
   }
 }
 
-variable "database_dsn_parameter_name" {
-  description = "Existing SSM SecureString parameter containing the managed CockroachDB TLS DSN. Its value is never placed in Terraform state or EC2 user data."
-  type        = string
-  default     = "/static-log-analysis/database-dsn"
-
-  validation {
-    condition     = can(regex("^/[A-Za-z0-9_.\\-/]+$", var.database_dsn_parameter_name))
-    error_message = "database_dsn_parameter_name must be an absolute SSM parameter name."
-  }
-}
-
-variable "database_kms_key_arn" {
-  description = "Optional customer-managed KMS key ARN protecting the database DSN parameter. Leave empty for the AWS-managed SSM key."
-  type        = string
-  default     = ""
-}
-
 variable "cloudwatch_sources" {
   description = "Exact same-account regional CloudWatch log groups and deterministic identity assigned to each."
   type = map(object({
@@ -106,7 +167,7 @@ variable "cloudwatch_sources" {
   }))
 
   validation {
-    condition = length(var.cloudwatch_sources) > 0 && alltrue([
+    condition = alltrue([
       for source in values(var.cloudwatch_sources) :
       source.log_group_arn != "" && can(regex("^[.\\-_/#A-Za-z0-9]+$", source.log_group_name)) &&
       can(regex("^[A-Za-z0-9._-]+$", source.service)) &&
@@ -115,7 +176,7 @@ variable "cloudwatch_sources" {
       !strcontains(source.service, "=") && !strcontains(source.service, ",") &&
       !strcontains(source.environment, "=") && !strcontains(source.environment, ",")
     ])
-    error_message = "At least one exact CloudWatch source is required; fields cannot contain '=' or ','."
+    error_message = "CloudWatch source fields cannot contain '=', or ','."
   }
 }
 

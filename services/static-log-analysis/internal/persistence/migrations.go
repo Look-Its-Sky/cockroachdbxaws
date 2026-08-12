@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/migrations"
 	crdbpgxv5 "github.com/cockroachdb/cockroach-go/v2/crdb/crdbpgxv5"
@@ -18,27 +20,52 @@ import (
 
 const CurrentSchemaVersion = 2
 
-// expectedCatalogChecksumHex pins CockroachDB v25.3.7 SHOW CREATE output for
-// the complete reviewed single-region schema, including defaults, constraint
-// definitions, index columns/uniqueness, FKs, and locality.
-const expectedCatalogChecksumHex = "07edf27ac7f72c991a640d4ded3faf3f99ffafbe88add3b2db98fb26c9416792"
+const schemaLockRestoreTimeout = 30 * time.Second
+
+const (
+	expectedPortableCatalogChecksumV2537       = "07edf27ac7f72c991a640d4ded3faf3f99ffafbe88add3b2db98fb26c9416792"
+	expectedPortableCatalogChecksumV2625       = "ff0d8b05d0917ed8c08385723c0d6cd42c52c8499390a9cfb41bf962db7c6179"
+	expectedRegionalCatalogChecksumV2537       = "5c4e479a20d33a9af6345a8c4fd1660b569dbf039ec453b8181d27aedb0d28dd"
+	expectedRegionalCatalogChecksumV2625       = "40b5fed64ac50f2533971fe14ead21b73af42e893a36b06e394909abbab0bf63"
+	expectedLockedRegionalCatalogChecksumV2625 = "2ef14b55a31a86de4099ac20953b32a54c1b643935a81c36fb64ebb49895a0b3"
+)
+
+// SHOW CREATE formatting is CockroachDB-version-specific. These closed sets
+// pin the complete reviewed schema for supported versions while keeping the
+// portable and one-region-managed locality contracts distinct.
+var expectedCatalogChecksums = map[singleRegionTopology]map[string]struct{}{
+	topologyPortable: {
+		expectedPortableCatalogChecksumV2537: {},
+		expectedPortableCatalogChecksumV2625: {},
+	},
+	topologyCockroachRegional: {
+		expectedRegionalCatalogChecksumV2537:       {},
+		expectedRegionalCatalogChecksumV2625:       {},
+		expectedLockedRegionalCatalogChecksumV2625: {},
+	},
+}
 
 type migration struct {
-	version  int
-	name     string
-	checksum [sha256.Size]byte
-	sql      string
+	version            int
+	name               string
+	checksum           [sha256.Size]byte
+	sql                string
+	schemaChangeTables []string
+}
+
+var migrationSchemaChangeTables = map[int][]string{
+	2: {"occurrences"},
 }
 
 func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool, topology Topology) error {
 	if pool == nil || topology != TopologySingleRegion {
 		return ErrInvalidInput
 	}
-	compatibleTopology, err := verifySingleRegionTopology(ctx, pool)
+	databaseTopology, err := inspectSingleRegionTopology(ctx, pool)
 	if err != nil {
 		return databaseError(ctx, err)
 	}
-	if !compatibleTopology {
+	if databaseTopology == topologyIncompatible {
 		return ErrIncompatibleSchema
 	}
 	loaded, err := loadMigrations()
@@ -65,6 +92,13 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool, topology Topology)
 
 	for _, item := range loaded {
 		item := item
+		var lockedTables []string
+		if item.version > highest {
+			lockedTables, err = temporarilyUnlockTables(ctx, pool, item.schemaChangeTables)
+			if err != nil {
+				return databaseError(ctx, err)
+			}
+		}
 		err := crdbpgxv5.ExecuteTx(ctx, pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 			var name string
 			var checksum []byte
@@ -86,12 +120,17 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool, topology Topology)
 			_, err = tx.Exec(ctx, `INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)`, item.version, item.name, item.checksum[:])
 			return err
 		})
+		relockErr := restoreTableLocks(ctx, pool, lockedTables)
+		if relockErr != nil {
+			return databaseError(ctx, relockErr)
+		}
 		if err != nil {
 			if errors.Is(err, ErrIncompatibleSchema) {
 				return ErrIncompatibleSchema
 			}
 			return databaseError(ctx, err)
 		}
+		highest = item.version
 	}
 	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
 	if err != nil {
@@ -130,7 +169,7 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool, topology Topology)
 	if err != nil {
 		return databaseError(ctx, err)
 	}
-	if hex.EncodeToString(catalogChecksum[:]) != expectedCatalogChecksumHex {
+	if !catalogChecksumIsExpected(databaseTopology, hex.EncodeToString(catalogChecksum[:])) {
 		return ErrIncompatibleSchema
 	}
 	var storedCatalog []byte
@@ -147,6 +186,58 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool, topology Topology)
 		return ErrIncompatibleSchema
 	}
 	return nil
+}
+
+func temporarilyUnlockTables(ctx context.Context, pool *pgxpool.Pool, tables []string) ([]string, error) {
+	locked := make([]string, 0, len(tables))
+	for _, table := range tables {
+		if _, known := requiredSchema[table]; !known {
+			_ = restoreTableLocks(ctx, pool, locked)
+			return nil, ErrIncompatibleSchema
+		}
+		var returnedName, createStatement string
+		quoted := fmt.Sprintf(`%q`, table)
+		if err := pool.QueryRow(ctx, `SHOW CREATE TABLE `+quoted).Scan(&returnedName, &createStatement); err != nil {
+			_ = restoreTableLocks(ctx, pool, locked)
+			return nil, err
+		}
+		if !strings.Contains(createStatement, "schema_locked = true") {
+			continue
+		}
+		if _, err := pool.Exec(ctx, `ALTER TABLE `+quoted+` SET (schema_locked=false)`); err != nil {
+			_ = restoreTableLocks(ctx, pool, locked)
+			return nil, err
+		}
+		locked = append(locked, table)
+	}
+	return locked, nil
+}
+
+func restoreTableLocks(ctx context.Context, pool *pgxpool.Pool, tables []string) error {
+	cleanupBase := context.Background()
+	if ctx != nil {
+		cleanupBase = context.WithoutCancel(ctx)
+	}
+	cleanupCtx, cancel := context.WithTimeout(cleanupBase, schemaLockRestoreTimeout)
+	defer cancel()
+
+	var first error
+	for i := len(tables) - 1; i >= 0; i-- {
+		quoted := fmt.Sprintf(`%q`, tables[i])
+		if _, err := pool.Exec(cleanupCtx, `ALTER TABLE `+quoted+` SET (schema_locked=true)`); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+func catalogChecksumIsExpected(topology singleRegionTopology, checksum string) bool {
+	allowed, ok := expectedCatalogChecksums[topology]
+	if !ok {
+		return false
+	}
+	_, ok = allowed[checksum]
+	return ok
 }
 
 func loadMigrations() ([]migration, error) {
@@ -171,7 +262,10 @@ func loadMigrations() ([]migration, error) {
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, migration{version: version, name: entry.Name(), checksum: sha256.Sum256(content), sql: string(content)})
+		result = append(result, migration{
+			version: version, name: entry.Name(), checksum: sha256.Sum256(content), sql: string(content),
+			schemaChangeTables: append([]string(nil), migrationSchemaChangeTables[version]...),
+		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].version < result[j].version })
 	if len(result) != CurrentSchemaVersion {

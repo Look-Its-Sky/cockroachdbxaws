@@ -1,19 +1,28 @@
 #!/bin/bash
 set -euxo pipefail
 
-dnf install -y docker git awscli-2
+dnf install -y docker git awscli-2 openssl
 systemctl enable --now docker
 
 install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/static-log-analysis
+install -d -o root -g root -m 0700 /etc/static-log-analysis
+curl -fsSL \
+  https://github.com/docker/buildx/releases/download/v0.34.1/buildx-v0.34.1.linux-amd64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-buildx
+echo 'f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b  /usr/local/lib/docker/cli-plugins/docker-buildx' | sha256sum --check
+chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx
 curl -fsSL \
   https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 echo 'c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum --check
 chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+docker buildx version
 docker compose version
 
 printf '%s' '${compose_base64}' | base64 --decode > /opt/static-log-analysis/compose.yaml
 chmod 0644 /opt/static-log-analysis/compose.yaml
+printf '%s' '${caddy_base64}' | base64 --decode > /opt/static-log-analysis/Caddyfile
+chmod 0644 /opt/static-log-analysis/Caddyfile
 
 cat > /etc/static-log-analysis.env <<'ENVIRONMENT'
 SLA_REGION='${region}'
@@ -25,13 +34,169 @@ SLA_CREDENTIAL_IDENTITY='${credential_identity}'
 SLA_CLOUDWATCH_LOG_GROUPS='${cloudwatch_groups}'
 SLA_OUTBOX_QUEUE_URL='${queue_url}'
 SLA_OUTBOX_DEAD_LETTER_QUEUE_URL='${dead_letter_queue_url}'
-SLA_DATABASE_PARAMETER_NAME='${database_parameter_name}'
 SLA_REPOSITORY_URL='${repository_url}'
 SLA_REPOSITORY_REF='${repository_ref}'
 SLA_JOURNAL_MAX_BYTES='${journal_max_bytes}'
 SLA_JOURNAL_MIN_FREE_BYTES='${journal_min_free_bytes}'
+SLA_DASHBOARD_ENABLED='${dashboard_enabled}'
+SLA_DASHBOARD_HOSTNAME='${dashboard_hostname}'
 ENVIRONMENT
 chmod 0600 /etc/static-log-analysis.env
+
+cat > /usr/local/sbin/set-static-log-analysis-database-dsn <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "run this command with sudo" >&2
+  exit 1
+fi
+
+database_secret_file=/etc/static-log-analysis/secrets.env
+temporary_secret="$(mktemp /etc/static-log-analysis/secrets.env.XXXXXX)"
+trap 'rm -f "$temporary_secret"' EXIT
+chmod 0600 "$temporary_secret"
+
+printf 'CockroachDB TLS DSN: ' >&2
+IFS= read -r -s database_dsn </dev/tty
+printf '\n' >&2
+if [ -z "$database_dsn" ]; then
+  echo "database DSN cannot be empty" >&2
+  exit 1
+fi
+case "$database_dsn" in
+  postgresql://*sslmode=verify-full*) ;;
+  *)
+    echo "database DSN must be a postgresql:// URL using sslmode=verify-full" >&2
+    exit 1
+    ;;
+esac
+# Provider connection strings may name a certificate on the operator's laptop.
+# This image carries the system CA bundle, which verifies CockroachDB Cloud's
+# public certificate chain. pgx requires the system store to be selected
+# explicitly when sslmode=verify-full.
+if [[ "$database_dsn" == *"sslrootcert="* ]]; then
+  database_dsn="$(printf '%s' "$database_dsn" | sed -E \
+    's#([?&]sslrootcert=)[^&]*#\1system#')"
+else
+  database_dsn="$${database_dsn}&sslrootcert=system"
+fi
+if [[ "$database_dsn" == *"autocommit_before_ddl="* ]]; then
+  database_dsn="$(printf '%s' "$database_dsn" | sed -E \
+    's#([?&]autocommit_before_ddl=)[^&]*#\1false#')"
+else
+  database_dsn="$${database_dsn}&autocommit_before_ddl=false"
+fi
+
+escaped_dsn="$${database_dsn//\\/\\\\}"
+escaped_dsn="$${escaped_dsn//\'/\\\'}"
+printf "STATIC_LOG_ANALYSIS_DATABASE_DSN='%s'\n" "$escaped_dsn" > "$temporary_secret"
+unset database_dsn
+unset escaped_dsn
+install -o root -g root -m 0600 "$temporary_secret" "$database_secret_file"
+rm -f "$temporary_secret"
+trap - EXIT
+
+if docker image inspect static-log-analysis:hackathon >/dev/null 2>&1; then
+  systemctl restart static-log-analysis.service
+  echo "database DSN installed; static-log-analysis restarted"
+else
+  /usr/local/sbin/deploy-static-log-analysis
+  echo "database DSN installed; static-log-analysis deployed and started"
+fi
+SCRIPT
+chmod 0750 /usr/local/sbin/set-static-log-analysis-database-dsn
+
+cat > /usr/local/sbin/set-static-log-analysis-dashboard-auth <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "run this command with sudo" >&2
+  exit 1
+fi
+. /etc/static-log-analysis.env
+if [ "$SLA_DASHBOARD_ENABLED" != "true" ]; then
+  echo "enable dashboard_enabled in Terraform before installing dashboard authentication" >&2
+  exit 1
+fi
+
+dashboard_secret_file=/etc/static-log-analysis/dashboard.env
+temporary_secret="$(mktemp /etc/static-log-analysis/dashboard.env.XXXXXX)"
+trap 'rm -f "$temporary_secret"' EXIT
+chmod 0600 "$temporary_secret"
+
+auth_secret="$(openssl rand -base64 48)"
+printf "BETTER_AUTH_SECRET='%s'\n" "$auth_secret" > "$temporary_secret"
+unset auth_secret
+install -o root -g root -m 0600 "$temporary_secret" "$dashboard_secret_file"
+rm -f "$temporary_secret"
+trap - EXIT
+
+if docker image inspect static-log-analysis-dashboard:hackathon >/dev/null 2>&1; then
+  systemctl restart static-log-analysis.service
+else
+  /usr/local/sbin/deploy-static-log-analysis
+fi
+echo "dashboard authentication installed and migrations applied"
+echo "create a login with: sudo create-static-log-analysis-dashboard-admin"
+SCRIPT
+chmod 0750 /usr/local/sbin/set-static-log-analysis-dashboard-auth
+
+cat > /usr/local/sbin/create-static-log-analysis-dashboard-admin <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "run this command with sudo" >&2
+  exit 1
+fi
+. /etc/static-log-analysis.env
+if [ "$SLA_DASHBOARD_ENABLED" != "true" ]; then
+  echo "enable dashboard_enabled in Terraform before creating a dashboard administrator" >&2
+  exit 1
+fi
+
+database_secret_file=/etc/static-log-analysis/secrets.env
+dashboard_secret_file=/etc/static-log-analysis/dashboard.env
+for secret_file in "$database_secret_file" "$dashboard_secret_file"; do
+  if [ ! -f "$secret_file" ] || [ -L "$secret_file" ] || [ "$(stat -c '%u:%g:%a' "$secret_file")" != "0:0:600" ]; then
+    echo "$secret_file must be a root-owned regular file with mode 0600" >&2
+    exit 1
+  fi
+done
+
+printf 'Administrator email: ' >&2
+IFS= read -r admin_email </dev/tty
+printf 'Password (9-128 characters): ' >&2
+IFS= read -r -s admin_password </dev/tty
+printf '\nConfirm password: ' >&2
+IFS= read -r -s admin_password_confirmation </dev/tty
+printf '\n' >&2
+
+if [[ ! "$admin_email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+  echo "a valid administrator email is required" >&2
+  exit 1
+fi
+if [ "$admin_password" != "$admin_password_confirmation" ]; then
+  echo "passwords do not match" >&2
+  exit 1
+fi
+if [ "$${#admin_password}" -lt 9 ] || [ "$${#admin_password}" -gt 128 ]; then
+  echo "password must contain 9 to 128 characters" >&2
+  exit 1
+fi
+
+printf '%s\n%s\n' "$admin_email" "$admin_password" | docker compose \
+  --project-name static-log-analysis-aws \
+  --env-file "$database_secret_file" \
+  --env-file "$dashboard_secret_file" \
+  --file /opt/static-log-analysis/compose.yaml \
+  --profile dashboard-admin \
+  run --rm -T dashboard-create-admin
+unset admin_email admin_password admin_password_confirmation
+SCRIPT
+chmod 0750 /usr/local/sbin/create-static-log-analysis-dashboard-admin
 
 cat > /usr/local/sbin/start-static-log-analysis <<'SCRIPT'
 #!/bin/bash
@@ -40,13 +205,68 @@ set -a
 . /etc/static-log-analysis.env
 set +a
 
-export STATIC_LOG_ANALYSIS_DATABASE_DSN
-STATIC_LOG_ANALYSIS_DATABASE_DSN="$(aws ssm get-parameter \
-  --region "$SLA_REGION" \
-  --name "$SLA_DATABASE_PARAMETER_NAME" \
-  --with-decryption \
-  --query Parameter.Value \
-  --output text)"
+database_secret_file=/etc/static-log-analysis/secrets.env
+if [ ! -f "$database_secret_file" ] || [ -L "$database_secret_file" ]; then
+  echo "database DSN is not installed; run: sudo set-static-log-analysis-database-dsn" >&2
+  exit 1
+fi
+if [ "$(stat -c '%u:%g:%a' "$database_secret_file")" != "0:0:600" ]; then
+  echo "$database_secret_file must be owned by root:root with mode 0600" >&2
+  exit 1
+fi
+
+if [ "$(wc -l < "$database_secret_file")" -ne 1 ] || \
+  ! grep -q "^STATIC_LOG_ANALYSIS_DATABASE_DSN='.*'$" "$database_secret_file"; then
+  echo "$database_secret_file does not contain the required database DSN entry" >&2
+  exit 1
+fi
+
+docker compose \
+  --project-name static-log-analysis-aws \
+  --env-file "$database_secret_file" \
+  --file /opt/static-log-analysis/compose.yaml \
+  up --no-build --detach --remove-orphans
+
+dashboard_secret_file=/etc/static-log-analysis/dashboard.env
+if [ "$SLA_DASHBOARD_ENABLED" = "true" ] && [ -f "$dashboard_secret_file" ]; then
+  if [ -L "$dashboard_secret_file" ] || [ "$(stat -c '%u:%g:%a' "$dashboard_secret_file")" != "0:0:600" ]; then
+    echo "$dashboard_secret_file must be owned by root:root with mode 0600" >&2
+    exit 1
+  fi
+  if [ "$(wc -l < "$dashboard_secret_file")" -ne 1 ] || \
+    ! grep -q "^BETTER_AUTH_SECRET='[^']\{32,\}'$" "$dashboard_secret_file"; then
+    echo "$dashboard_secret_file does not contain a valid Better Auth secret" >&2
+    exit 1
+  fi
+  docker compose \
+    --project-name static-log-analysis-aws \
+    --env-file "$database_secret_file" \
+    --env-file "$dashboard_secret_file" \
+    --file /opt/static-log-analysis/compose.yaml \
+    --profile dashboard \
+    up --no-build --detach --remove-orphans dashboard caddy
+fi
+SCRIPT
+chmod 0750 /usr/local/sbin/start-static-log-analysis
+
+cat > /usr/local/sbin/deploy-static-log-analysis <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "run this command with sudo" >&2
+  exit 1
+fi
+
+set -a
+. /etc/static-log-analysis.env
+set +a
+
+database_secret_file=/etc/static-log-analysis/secrets.env
+if [ ! -f "$database_secret_file" ] || [ -L "$database_secret_file" ]; then
+  echo "database DSN is not installed; run: sudo set-static-log-analysis-database-dsn" >&2
+  exit 1
+fi
 
 repository=/opt/static-log-analysis/repository
 if [ ! -d "$repository/.git" ]; then
@@ -59,10 +279,21 @@ git -C "$repository" reset --hard FETCH_HEAD
 
 docker compose \
   --project-name static-log-analysis-aws \
+  --env-file "$database_secret_file" \
   --file /opt/static-log-analysis/compose.yaml \
-  up --build --detach --remove-orphans
+  build
+if [ "$SLA_DASHBOARD_ENABLED" = "true" ] && [ -f /etc/static-log-analysis/dashboard.env ]; then
+  docker compose \
+    --project-name static-log-analysis-aws \
+    --env-file "$database_secret_file" \
+    --env-file /etc/static-log-analysis/dashboard.env \
+    --file /opt/static-log-analysis/compose.yaml \
+    --profile dashboard \
+    build dashboard dashboard-auth-migrate
+fi
+systemctl restart static-log-analysis.service
 SCRIPT
-chmod 0750 /usr/local/sbin/start-static-log-analysis
+chmod 0750 /usr/local/sbin/deploy-static-log-analysis
 
 cat > /etc/systemd/system/static-log-analysis.service <<'UNIT'
 [Unit]
@@ -85,4 +316,5 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now static-log-analysis.service
+systemctl enable static-log-analysis.service
+echo "bootstrap complete; run sudo set-static-log-analysis-database-dsn in a Session Manager shell"

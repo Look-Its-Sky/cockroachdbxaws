@@ -70,12 +70,28 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 }
 
 func apply(ctx context.Context, dsn string) error {
-	pool, err := pgxpool.New(ctx, dsn)
+	config, err := migrationPoolConfig(dsn)
 	if err != nil {
-		// pgx can include the connection string in a parse error. Preserve only
-		// the retry category at this boundary.
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
 		return persistence.ErrUnavailable
 	}
 	defer pool.Close()
 	return persistence.ApplyMigrations(ctx, pool, persistence.TopologySingleRegion)
+}
+
+func migrationPoolConfig(dsn string) (*pgxpool.Config, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// pgx can include the connection string in a parse error. Preserve only
+		// the retry category at this boundary.
+		return nil, persistence.ErrUnavailable
+	}
+	// CockroachDB v25.2 changed this session default to true. Migrations rely
+	// on atomic DDL and must override both the server default and any value in
+	// an operator-supplied connection string.
+	config.ConnConfig.RuntimeParams["autocommit_before_ddl"] = "false"
+	return config, nil
 }

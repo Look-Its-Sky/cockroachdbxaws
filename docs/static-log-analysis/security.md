@@ -133,3 +133,24 @@ Log content is untrusted evidence, never an instruction to the agent.
 Service, environment, and region attributes inside application logs are also
 untrusted. Admission validates them against the authenticated Collector or source
 envelope before they can influence grouping, authorization, or regional routing.
+
+The storage boundary is independently single-region. Operators must provision
+the CockroachDB database in the same physical cloud region as the analysis
+deployment. Before any migration mutation, startup accepts either an unassigned
+portable database or exactly one CockroachDB database region with zone survival;
+it rejects multiple regions, secondary regions, and region-survival placement.
+Portable and managed one-region schemas have separate closed catalog checksum
+sets so a locality change cannot be mistaken for harmless formatting drift.
+
+## Public operations dashboard
+
+The optional dashboard is publicly reachable but authentication-gated. It
+exposes only the bounded projection specified in `dashboard.md`, has no
+CockroachDB credential, and receives only `sqs:GetQueueAttributes` through the
+instance role. Public reachability never exposes log content, queue payloads,
+internal admin ports, or service credentials. Authorization requires both a
+valid Better Auth session backed by the EC2-local SQLite database and an
+explicit `admin` role. Public sign-up is disabled. The SQLite database stores
+only dashboard identity, credential, session, verification, and authorization
+records; it is not an analysis datastore and the dashboard receives no
+CockroachDB credential.

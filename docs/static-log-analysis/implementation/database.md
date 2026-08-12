@@ -187,16 +187,35 @@ updates and be verified under concurrent load. Exact occurrence truth remains in
 
 ## Regional topology
 
-The supported production topology is explicitly `single-region`: each region has
-its own analysis deployment and its own CockroachDB database with no CockroachDB
-multi-region database configuration. Startup migration and Store construction
-require that mode, and migration refuses a database with a configured primary
-region. `region` remains in relational keys and every ordinary Store is bound to
-one region and tenant as defense in depth.
+The supported production topology is explicitly `single-region`: each physical
+region has its own analysis deployment and its own CockroachDB database. The
+database may either have no CockroachDB regional metadata, as in the portable
+self-hosted topology, or be assigned exactly one CockroachDB database region, as
+CockroachDB Cloud does for a single-region managed cluster. In the managed form,
+the one region MUST be the primary region, there MUST be no secondary region,
+and the survival goal MUST be `ZONE`. Deployment configuration is responsible
+for placing that database in the same physical cloud region as the analysis
+service; provider-specific region names are not inferred from log claims.
 
-Regional-by-row and any shared multi-region database are unsupported. Supporting
-either requires a new reviewed migration and threat-model update; the portable
-base migration MUST NOT claim or silently infer that locality. Catalog verification
-pins the full reviewed `SHOW CREATE` definitions, including columns, nullability,
-defaults, checks, indexes, foreign keys, and locality, in addition to the migration
-ledger checksum. Drift or an unknown ledger version refuses startup.
+Startup migration and Store construction require the explicit single-region
+mode. Migration reads the live database metadata before making a schema change
+and refuses zero/one-region metadata inconsistencies, two or more database
+regions, a secondary region, or a region-survival goal. `region` remains in
+relational keys and every ordinary Store is bound to one region and tenant as
+defense in depth.
+
+Regional-by-row placement and any database shared across physical regions are
+unsupported. Supporting either requires another reviewed migration and
+threat-model update. Catalog verification keeps separate closed checksum sets
+for the portable and one-region-managed table localities and pins the full
+reviewed `SHOW CREATE` definitions, including columns, nullability, defaults,
+checks, indexes, foreign keys, and locality, in addition to the migration ledger
+checksum. Drift, an unknown CockroachDB catalog shape, or an unknown ledger
+version refuses startup.
+
+CockroachDB Cloud may protect managed tables with `schema_locked=true`.
+Migration metadata names the existing tables each version must change. A pending
+migration checks those named tables, temporarily unlocks only locks that were
+already present, runs the reviewed migration transaction, and restores every
+original lock before it reports success or failure. Failure to restore a lock is
+a startup failure. Already-applied migrations do not toggle locks.

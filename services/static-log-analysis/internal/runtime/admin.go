@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/persistence"
 )
 
 // The admin surface is separate from the OTLP listener on purpose. operations.md
@@ -26,6 +29,7 @@ const (
 	HealthPath    = "/healthz"
 	ReadyPath     = "/readyz"
 	MetricsPath   = "/metrics"
+	OverviewPath  = "/overviewz"
 	adminReadTime = 5 * time.Second
 )
 
@@ -50,8 +54,9 @@ type adminServer struct {
 	listener net.Listener
 	serving  sync.WaitGroup
 
-	health  func() Health
-	metrics func() []metric
+	health   func() Health
+	metrics  func() []metric
+	overview func(context.Context) (persistence.Overview, error)
 }
 
 func newAdminServer(listen string, health func() Health, metrics func() []metric) (*adminServer, error) {
@@ -64,6 +69,7 @@ func newAdminServer(listen string, health func() Health, metrics func() []metric
 	mux.HandleFunc(HealthPath, admin.serveHealth)
 	mux.HandleFunc(ReadyPath, admin.serveReady)
 	mux.HandleFunc(MetricsPath, admin.serveMetrics)
+	mux.HandleFunc(OverviewPath, admin.serveOverview)
 	admin.server = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: adminReadTime,
@@ -83,6 +89,30 @@ func newAdminServer(listen string, health func() Health, metrics func() []metric
 		}
 	}()
 	return admin, nil
+}
+
+func (a *adminServer) serveOverview(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		writeText(writer, http.StatusMethodNotAllowed, "method not allowed\n")
+		return
+	}
+	if a.overview == nil {
+		writeText(writer, http.StatusNotFound, "not available\n")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), adminReadTime)
+	defer cancel()
+	value, err := a.overview(ctx)
+	if err != nil {
+		writeText(writer, http.StatusServiceUnavailable, "unavailable\n")
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(writer).Encode(value)
 }
 
 func (a *adminServer) Addr() string {

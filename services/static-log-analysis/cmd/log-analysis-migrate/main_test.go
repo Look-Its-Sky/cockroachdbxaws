@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/persistence"
 )
 
 func TestRunRequiresDatabaseDSN(t *testing.T) {
@@ -82,5 +84,26 @@ func TestRunRejectsArgumentsBeforeOpeningDatabase(t *testing.T) {
 
 	if exit != exitConfiguration || called {
 		t.Fatalf("exit=%d called=%v, want configuration failure before migration", exit, called)
+	}
+}
+
+func TestMigrationPoolDisablesDDLAutocommit(t *testing.T) {
+	config, err := migrationPoolConfig("postgresql://root@cockroachdb:26257/logs?sslmode=disable&autocommit_before_ddl=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.ConnConfig.RuntimeParams["autocommit_before_ddl"]; got != "false" {
+		t.Fatalf("autocommit_before_ddl=%q, want false for transactional migrations", got)
+	}
+}
+
+func TestMigrationPoolConfigurationErrorDoesNotLeakTheDSN(t *testing.T) {
+	const secret = "hunter2"
+	_, err := migrationPoolConfig("postgresql://root:" + secret + "@%gh&%ij")
+	if !errors.Is(err, persistence.ErrUnavailable) {
+		t.Fatalf("error=%v, want unavailable", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("configuration error leaked database credentials: %v", err)
 	}
 }

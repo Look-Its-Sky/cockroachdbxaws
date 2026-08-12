@@ -1,26 +1,22 @@
-region    = "us-east-1"
+region    = "us-east-2"
 tenant_id = "hackathon-production"
 
 # Pin this to the commit you want the EC2 instance to build.
 repository_ref = "Static-Log-Analysis"
 
-# Create this SecureString before terraform apply. Never put its value here.
-database_dsn_parameter_name = "/static-log-analysis/database-dsn"
+# The example creates a separate OpenTelemetry Demo host. Replace this
+# documentation-only address with the public /32 that may open the demo UI.
+deploy_demo       = true
+demo_ingress_cidr = "203.0.113.10/32"
 
-cloudwatch_sources = {
-  api = {
-    log_group_arn  = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/ecs/application/api"
-    log_group_name = "/aws/ecs/application/api"
-    service        = "api"
-    environment    = "production"
-  }
-  worker = {
-    log_group_arn  = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/ecs/application/worker"
-    log_group_name = "/aws/ecs/application/worker"
-    service        = "worker"
-    environment    = "production"
-  }
-}
+# Publicly reachable, but protected by a local Better Auth administrator login.
+# Point this hostname at instance_public_ip before installing dashboard auth.
+dashboard_enabled      = false
+dashboard_hostname     = "logs.example.com"
+dashboard_ingress_cidr = "0.0.0.0/0"
+
+# Add existing application log groups here when moving beyond the example.
+cloudwatch_sources = {}
 
 tags = {
   Environment = "hackathon"

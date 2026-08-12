@@ -1,0 +1,75 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf install -y docker git
+systemctl enable --now docker
+
+install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/opentelemetry-demo
+curl -fsSL \
+  https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+echo 'c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum --check
+chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version
+
+cat > /opt/opentelemetry-demo/cloudwatch-logs.yaml <<'COMPOSE'
+services:
+  payment:
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: '${region}'
+        awslogs-group: '${log_group_name}'
+        awslogs-stream: payment
+        awslogs-create-group: 'false'
+COMPOSE
+chmod 0644 /opt/opentelemetry-demo/cloudwatch-logs.yaml
+
+cat > /usr/local/sbin/start-opentelemetry-demo <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+repository=/opt/opentelemetry-demo/repository
+if [ ! -d "$repository/.git" ]; then
+  install -d -m 0755 "$repository"
+  git -C "$repository" init
+  git -C "$repository" remote add origin https://github.com/open-telemetry/opentelemetry-demo.git
+fi
+git -C "$repository" fetch --depth 1 origin '${repository_ref}'
+git -C "$repository" reset --hard FETCH_HEAD
+
+docker compose \
+  --project-name opentelemetry-demo \
+  --file "$repository/compose.yaml" \
+  --file /opt/opentelemetry-demo/cloudwatch-logs.yaml \
+  pull
+docker compose \
+  --project-name opentelemetry-demo \
+  --file "$repository/compose.yaml" \
+  --file /opt/opentelemetry-demo/cloudwatch-logs.yaml \
+  up --detach --no-build --remove-orphans
+SCRIPT
+chmod 0750 /usr/local/sbin/start-opentelemetry-demo
+
+cat > /etc/systemd/system/opentelemetry-demo.service <<'UNIT'
+[Unit]
+Description=OpenTelemetry Astronomy Shop Demo
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=DEMO_VERSION=${demo_version}
+ExecStart=/usr/local/sbin/start-opentelemetry-demo
+ExecStop=/usr/bin/docker compose --project-name opentelemetry-demo --file /opt/opentelemetry-demo/repository/compose.yaml --file /opt/opentelemetry-demo/cloudwatch-logs.yaml down
+TimeoutStartSec=30min
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now opentelemetry-demo.service

@@ -268,7 +268,8 @@ The hackathon deployment has one path: Terraform creates one outbound-only EC2
 host, and that host runs `deploy/aws/compose.yaml`. The combined `cloudwatch`
 role pulls and processes logs against its own durable journal; `outbox`
 publishes elected investigations to regional SQS. Managed CockroachDB remains
-external and its TLS DSN is retrieved from SSM Parameter Store at runtime.
+external and its TLS DSN is loaded from a root-only Compose environment file on
+the encrypted EC2 disk.
 
 Follow the [single deployment guide](../../docs/static-log-analysis/deployment.md).
 The root `compose.yaml` remains local development infrastructure and must not be

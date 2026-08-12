@@ -71,6 +71,17 @@ func TestQuoteIdentifierEscapesQuotes(t *testing.T) {
 	}
 }
 
+func TestImageHonorsTheUpgradeTestOverride(t *testing.T) {
+	t.Setenv(imageEnv, "cockroachdb/cockroach:upgrade-test")
+	if got := Image(); got != "cockroachdb/cockroach:upgrade-test" {
+		t.Fatalf("image=%q", got)
+	}
+	t.Setenv(imageEnv, "")
+	if got := Image(); got != PinnedImage {
+		t.Fatalf("default image=%q", got)
+	}
+}
+
 func TestDisabledTestsAreSkipped(t *testing.T) {
 	t.Setenv(disableEnv, "off")
 	t.Setenv(requireEnv, "")

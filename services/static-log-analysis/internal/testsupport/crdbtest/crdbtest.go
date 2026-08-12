@@ -43,12 +43,12 @@ const (
 	// PinnedImage is exported for exceptional topology tests which require a
 	// dedicated container rather than the process-wide single-region cluster.
 	// It is pinned by digest, not only by tag. A tag such as
-	// latest-v25.3 moves between patch releases, so integration behaviour and
+	// latest-v26.2 moves between patch releases, so integration behaviour and
 	// CI results could change with no commit in this repository. The digest
 	// makes a database upgrade a reviewed change; the tag is retained for
 	// readability.
-	PinnedImage = "cockroachdb/cockroach:v25.3.7@sha256:" +
-		"2804a08ced78596780b6acde2ef203421ed5b79e371779491af49e4c9eb6aa4e"
+	PinnedImage = "cockroachdb/cockroach:v26.2.5@sha256:" +
+		"771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282"
 	defaultImage = PinnedImage
 )
 
@@ -140,6 +140,16 @@ func Available(ctx context.Context) error {
 	return err
 }
 
+// Image returns the explicitly requested upgrade-test image, or the reviewed
+// default. Dedicated topology tests use it so CRDB_TEST_IMAGE exercises every
+// CockroachDB boundary rather than only the shared harness.
+func Image() string {
+	if image := os.Getenv(imageEnv); image != "" {
+		return image
+	}
+	return defaultImage
+}
+
 // sharedDSN starts the container on first use and returns its connection
 // string. Later callers reuse it, including its failure.
 func sharedDSN(ctx context.Context) (string, error) {
@@ -148,10 +158,7 @@ func sharedDSN(ctx context.Context) (string, error) {
 	}
 
 	shared.once.Do(func() {
-		image := os.Getenv(imageEnv)
-		if image == "" {
-			image = defaultImage
-		}
+		image := Image()
 		container, err := cockroachdb.Run(ctx, image, cockroachdb.WithInsecure())
 		if err != nil {
 			shared.err = fmt.Errorf("starting %s: %w", image, err)

@@ -4,11 +4,12 @@
 
 ```text
 docs/        design documents and normative implementation contracts
-services/    deployable components, one Go module each
+services/    deployable Go analysis service and Next.js operations dashboard
 ```
 
-The only component so far is `services/static-log-analysis/`. Run Go commands
-from inside that directory, or with `go -C services/static-log-analysis`.
+Run Go commands from `services/static-log-analysis/`, or with
+`go -C services/static-log-analysis`. Run dashboard npm commands from
+`services/dashboard/`.
 
 ## Progress
 
@@ -79,6 +80,13 @@ outbox containers on one EC2 host; `infra/aws` creates that host, its encrypted
 disk, regional SQS queues, stable outbound address, and least-privilege instance
 role. The fast CI gate renders Compose and validates Terraform. Managed
 CockroachDB remains external.
+
+The optional public operations dashboard is a Better Auth-protected Next.js
+container behind Caddy on the same analysis host. Its local SQLite database is
+only for dashboard users, sessions, and roles. It reads a bounded safe
+projection, unlabelled metrics, readiness, and SQS queue attributes, has no
+CockroachDB credential, and stays in an optional Compose profile so dashboard
+configuration cannot block analysis startup.
 
 The AWS CloudWatch pull path is the combined `cloudwatch` role. Its poll and
 process workers share one journal, checkpoints live on a second Docker volume,

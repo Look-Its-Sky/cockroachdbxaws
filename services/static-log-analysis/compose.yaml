@@ -2,7 +2,7 @@ name: static-log-analysis
 
 services:
   cockroachdb:
-    image: cockroachdb/cockroach:v25.3.7@sha256:2804a08ced78596780b6acde2ef203421ed5b79e371779491af49e4c9eb6aa4e
+    image: cockroachdb/cockroach:v26.2.5@sha256:771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282
     # The image's convenience entrypoint intentionally confines --insecure to
     # localhost. This stack is an isolated development network, so invoke the
     # reviewed binary directly and expose SQL only to Compose peers and the
@@ -28,7 +28,7 @@ services:
     stop_grace_period: 60s
 
   cockroach-init:
-    image: cockroachdb/cockroach:v25.3.7@sha256:2804a08ced78596780b6acde2ef203421ed5b79e371779491af49e4c9eb6aa4e
+    image: cockroachdb/cockroach:v26.2.5@sha256:771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282
     depends_on:
       cockroachdb:
         condition: service_healthy

@@ -10,6 +10,28 @@ defaults:
     working-directory: services/static-log-analysis
 
 jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    env:
+      BETTER_AUTH_SECRET: ci-only-secret-00000000000000000000000000000000
+      BETTER_AUTH_URL: http://localhost:3000
+      BETTER_AUTH_DATABASE_PATH: /tmp/static-log-analysis-dashboard-ci.sqlite
+    defaults:
+      run:
+        working-directory: services/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.13.0
+          cache: npm
+          cache-dependency-path: services/dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run auth:migrate
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+
   # Fast gate: unit, fixture, and property tests. Runs on every change.
   fast:
     runs-on: ubuntu-latest

@@ -142,6 +142,7 @@ type Server struct {
 	enrichment     *enrich.Cache
 	admin          *adminServer
 	service        *pipeline.Service
+	overview       func(context.Context) (persistence.Overview, error)
 	clock          clock.Clock
 	draining       atomic.Bool
 	// failed carries a fault a running component discovered that no retry can
@@ -245,6 +246,13 @@ func Start(ctx context.Context, config Config, deps Deps) (*Server, error) {
 		}
 	}
 	server.service = service
+	if provider, ok := store.(interface {
+		Overview(context.Context, int) (persistence.Overview, error)
+	}); ok {
+		server.overview = func(ctx context.Context) (persistence.Overview, error) {
+			return provider.Overview(ctx, 10)
+		}
+	}
 	if err := server.startAdmin(config); err != nil {
 		server.closeBoundaries()
 		return nil, err
@@ -504,6 +512,7 @@ func (s *Server) startAdmin(config Config) error {
 		// ingress port that cannot be bound.
 		return startupFault("%v", err)
 	}
+	admin.overview = s.overview
 	s.admin = admin
 	return nil
 }

@@ -115,14 +115,52 @@ func liveCatalogChecksum(ctx context.Context, pool *pgxpool.Pool) ([sha256.Size]
 	return result, nil
 }
 
-func verifySingleRegionTopology(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
-	var primaryRegion *string
-	err := pool.QueryRow(ctx, `SELECT primary_region FROM [SHOW DATABASES]
-		WHERE database_name=current_database()`).Scan(&primaryRegion)
+type singleRegionTopology uint8
+
+const (
+	topologyIncompatible singleRegionTopology = iota
+	topologyPortable
+	topologyCockroachRegional
+)
+
+func inspectSingleRegionTopology(ctx context.Context, pool *pgxpool.Pool) (singleRegionTopology, error) {
+	var primaryRegion, secondaryRegion, onlyRegion, survivalGoal *string
+	var regionCount int
+	err := pool.QueryRow(ctx, `SELECT primary_region, secondary_region,
+		COALESCE(array_length(regions, 1), 0), regions[1], survival_goal
+		FROM [SHOW DATABASES] WHERE database_name=current_database()`).Scan(
+		&primaryRegion, &secondaryRegion, &regionCount, &onlyRegion, &survivalGoal)
 	if err != nil {
-		return false, err
+		return topologyIncompatible, err
 	}
-	return primaryRegion == nil || strings.TrimSpace(*primaryRegion) == "", nil
+	return classifySingleRegionTopology(primaryRegion, secondaryRegion, regionCount, onlyRegion, survivalGoal), nil
+}
+
+func classifySingleRegionTopology(primaryRegion, secondaryRegion *string, regionCount int, onlyRegion, survivalGoal *string) singleRegionTopology {
+	primary := trimmed(primaryRegion)
+	secondary := trimmed(secondaryRegion)
+	region := trimmed(onlyRegion)
+	survival := trimmed(survivalGoal)
+	switch {
+	case primary == "" && secondary == "" && regionCount == 0 && region == "" && survival == "":
+		return topologyPortable
+	case primary != "" && secondary == "" && regionCount == 1 && region == primary && survival == "zone":
+		return topologyCockroachRegional
+	default:
+		return topologyIncompatible
+	}
+}
+
+func trimmed(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func verifySingleRegionTopology(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	topology, err := inspectSingleRegionTopology(ctx, pool)
+	return topology != topologyIncompatible, err
 }
 
 func columns(specs ...string) []columnContract {

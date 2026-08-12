@@ -17,6 +17,58 @@ func TestCheckedLeaseDeadlineRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestSingleRegionTopologyClassificationRejectsCrossRegionShapes(t *testing.T) {
+	value := func(text string) *string { return &text }
+	tests := []struct {
+		name      string
+		primary   *string
+		secondary *string
+		count     int
+		region    *string
+		survival  *string
+	}{
+		{name: "two regions", primary: value("aws-us-east-2"), count: 2, region: value("aws-us-east-2"), survival: value("zone")},
+		{name: "secondary region", primary: value("aws-us-east-2"), secondary: value("aws-us-west-2"), count: 1, region: value("aws-us-east-2"), survival: value("zone")},
+		{name: "region differs from primary", primary: value("aws-us-east-2"), count: 1, region: value("aws-us-west-2"), survival: value("zone")},
+		{name: "region survival", primary: value("aws-us-east-2"), count: 1, region: value("aws-us-east-2"), survival: value("region")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifySingleRegionTopology(test.primary, test.secondary, test.count, test.region, test.survival); got != topologyIncompatible {
+				t.Fatalf("cross-region topology classified as %v", got)
+			}
+		})
+	}
+}
+
+func TestSingleRegionTopologyClassificationAcceptsPortableAndOneRegionManagedDatabases(t *testing.T) {
+	value := func(text string) *string { return &text }
+	if got := classifySingleRegionTopology(nil, nil, 0, nil, nil); got != topologyPortable {
+		t.Fatalf("portable topology=%v", got)
+	}
+	if got := classifySingleRegionTopology(value("aws-us-east-2"), nil, 1, value("aws-us-east-2"), value("zone")); got != topologyCockroachRegional {
+		t.Fatalf("one-region managed topology=%v", got)
+	}
+}
+
+func TestCatalogChecksumsCannotCrossTopologyOrAcceptAnUnknownVersion(t *testing.T) {
+	if !catalogChecksumIsExpected(topologyPortable, expectedPortableCatalogChecksumV2625) {
+		t.Fatal("reviewed portable checksum rejected")
+	}
+	if !catalogChecksumIsExpected(topologyCockroachRegional, expectedRegionalCatalogChecksumV2625) {
+		t.Fatal("reviewed one-region managed checksum rejected")
+	}
+	if !catalogChecksumIsExpected(topologyCockroachRegional, expectedLockedRegionalCatalogChecksumV2625) {
+		t.Fatal("reviewed schema-locked managed checksum rejected")
+	}
+	if catalogChecksumIsExpected(topologyPortable, expectedRegionalCatalogChecksumV2625) {
+		t.Fatal("managed locality checksum accepted as portable")
+	}
+	if catalogChecksumIsExpected(topologyCockroachRegional, "unknown") {
+		t.Fatal("unknown catalog checksum accepted")
+	}
+}
+
 // stubValidator reports a fixed policy version and accepts everything. It only
 // has to make the batch-wide configuration comparison reachable.
 type stubValidator struct{ version string }
