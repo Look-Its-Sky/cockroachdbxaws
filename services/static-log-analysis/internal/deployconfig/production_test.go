@@ -117,6 +117,14 @@ func TestAWSBootstrapCompressesEmbeddedDeploymentFiles(t *testing.T) {
 	}
 }
 
+func TestAWSServiceBootstrapChangesPreserveTheEncryptedInstanceDisk(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	service := terraformResourceBlock(t, main, `resource "aws_instance" "service"`)
+	if !strings.Contains(service, "user_data_replace_on_change = false") {
+		t.Fatal("service bootstrap changes can replace the instance and delete its local durable state")
+	}
+}
+
 func TestAWSProviderUsesTheDeclaredRegionalBoundary(t *testing.T) {
 	versions := readProductionFile(t, "infra/aws/versions.tf")
 	for _, required := range []string{

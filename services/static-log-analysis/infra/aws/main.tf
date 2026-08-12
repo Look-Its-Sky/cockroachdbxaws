@@ -225,7 +225,10 @@ resource "aws_instance" "service" {
     dashboard_enabled      = var.dashboard_enabled
     dashboard_hostname     = var.dashboard_hostname
   })
-  user_data_replace_on_change = true
+  # This host owns the durable journal, checkpoints, and dashboard-auth volume.
+  # Bootstrap changes are applied in place through the documented SSM refresh;
+  # replacing the instance here would delete that encrypted local state.
+  user_data_replace_on_change = false
 
   metadata_options {
     http_endpoint               = "enabled"

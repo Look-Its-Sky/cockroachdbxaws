@@ -18,6 +18,12 @@ fetch or rebuild source. After pushing the configured repository ref, deploy it
 explicitly with `sudo deploy-static-log-analysis`; the helper builds first and
 restarts the service only after a successful build.
 
+Terraform does not replace the analysis instance when user data changes because
+its encrypted disk contains the journal, checkpoints, dashboard auth database,
+and locally installed CockroachDB connection. Apply bootstrap changes through
+the documented Session Manager refresh. Instance replacement is a deliberate
+state reset, not a routine upgrade.
+
 Important outputs:
 
 - `instance_public_ip`: authorize this `/32` in CockroachDB Cloud.

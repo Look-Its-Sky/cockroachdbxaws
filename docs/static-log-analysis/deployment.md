@@ -223,13 +223,16 @@ assignments remain in the queue.
 ## Updating and removing it
 
 For a hackathon code refresh, connect through Session Manager, replace the
-safe `SLA_REPOSITORY_REF` value in `/etc/static-log-analysis.env`, and restart
-`static-log-analysis`. The startup script fetches and builds that revision while
-preserving the existing Docker volumes.
+safe `SLA_REPOSITORY_REF` value in `/etc/static-log-analysis.env`, and run
+`sudo deploy-static-log-analysis`. The deployment helper fetches and builds that
+revision while preserving the existing Docker volumes.
 
-Changing `repository_ref` in Terraform replaces the EC2 instance because user
-data is an immutable bootstrap input. That also deletes the instance's journal
-and checkpoints, so use Terraform replacement only for a deliberate reset.
+Changing `repository_ref` updates the desired bootstrap configuration without
+replacing the analysis EC2 instance. Run `sudo deploy-static-log-analysis` to
+fetch and deploy the new ref. When the bootstrap template itself changes, an
+operator must deliberately refresh it through Session Manager; this preserves
+the local journal, dashboard auth database, checkpoints, and installed
+CockroachDB connection. Replace the instance only for a deliberate reset.
 
 To remove the AWS resources:
 
