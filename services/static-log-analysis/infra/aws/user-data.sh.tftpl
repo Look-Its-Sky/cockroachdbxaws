@@ -19,9 +19,9 @@ chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
 docker buildx version
 docker compose version
 
-printf '%s' '${compose_base64}' | base64 --decode > /opt/static-log-analysis/compose.yaml
+printf '%s' '${compose_base64}' | base64 --decode | gzip --decompress > /opt/static-log-analysis/compose.yaml
 chmod 0644 /opt/static-log-analysis/compose.yaml
-printf '%s' '${caddy_base64}' | base64 --decode > /opt/static-log-analysis/Caddyfile
+printf '%s' '${caddy_base64}' | base64 --decode | gzip --decompress > /opt/static-log-analysis/Caddyfile
 chmod 0644 /opt/static-log-analysis/Caddyfile
 
 cat > /etc/static-log-analysis.env <<'ENVIRONMENT'

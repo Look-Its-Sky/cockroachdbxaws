@@ -208,8 +208,8 @@ resource "aws_instance" "service" {
   vpc_security_group_ids      = [aws_security_group.service.id]
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
-    compose_base64         = filebase64("${path.module}/../../deploy/aws/compose.yaml")
-    caddy_base64           = filebase64("${path.module}/../../deploy/aws/Caddyfile")
+    compose_base64         = base64gzip(file("${path.module}/../../deploy/aws/compose.yaml"))
+    caddy_base64           = base64gzip(file("${path.module}/../../deploy/aws/Caddyfile"))
     region                 = var.region
     tenant_id              = var.tenant_id
     classification         = var.classification

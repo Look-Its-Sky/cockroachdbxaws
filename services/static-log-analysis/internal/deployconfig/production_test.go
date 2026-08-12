@@ -101,6 +101,22 @@ func TestAWSInfrastructureSeparatesPrivateAnalysisFromOptionalDemo(t *testing.T)
 	}
 }
 
+func TestAWSBootstrapCompressesEmbeddedDeploymentFiles(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
+	for _, required := range []string{
+		`base64gzip(file("${path.module}/../../deploy/aws/compose.yaml"))`,
+		`base64gzip(file("${path.module}/../../deploy/aws/Caddyfile"))`,
+	} {
+		if !strings.Contains(main, required) {
+			t.Errorf("AWS infrastructure does not compress embedded deployment file through %q", required)
+		}
+	}
+	if strings.Count(bootstrap, "base64 --decode | gzip --decompress") != 2 {
+		t.Fatal("AWS bootstrap does not decompress both embedded deployment files")
+	}
+}
+
 func TestAWSProviderUsesTheDeclaredRegionalBoundary(t *testing.T) {
 	versions := readProductionFile(t, "infra/aws/versions.tf")
 	for _, required := range []string{
