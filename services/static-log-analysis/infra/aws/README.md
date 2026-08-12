@@ -24,6 +24,11 @@ and locally installed CockroachDB connection. Apply bootstrap changes through
 the documented Session Manager refresh. Instance replacement is a deliberate
 state reset, not a routine upgrade.
 
+The `t3.small` is adequate at runtime, but a clean Next.js image build needs
+more memory than its 2 GiB RAM. Bootstrap provisions a bounded 2 GiB swap file
+on the already-encrypted root disk; this avoids increasing the recurring EC2
+instance size solely for deployment builds.
+
 Important outputs:
 
 - `instance_public_ip`: authorize this `/32` in CockroachDB Cloud.

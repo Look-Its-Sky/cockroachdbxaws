@@ -4,6 +4,17 @@ set -euxo pipefail
 dnf install -y docker git awscli-2 openssl
 systemctl enable --now docker
 
+# The t3.small runtime is sufficient for the service but a clean Next.js image
+# build can exceed its 2 GiB RAM. Keep a bounded swap file on the encrypted root
+# disk so deployment cannot wedge the host under memory pressure.
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  test -f /swapfile || fallocate -l 2G /swapfile
+  chmod 0600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/static-log-analysis
 install -d -o root -g root -m 0700 /etc/static-log-analysis
 curl -fsSL \
@@ -115,7 +126,9 @@ if [ "$EUID" -ne 0 ]; then
   echo "run this command with sudo" >&2
   exit 1
 fi
+set -a
 . /etc/static-log-analysis.env
+set +a
 if [ "$SLA_DASHBOARD_ENABLED" != "true" ]; then
   echo "enable dashboard_enabled in Terraform before installing dashboard authentication" >&2
   exit 1
@@ -151,7 +164,9 @@ if [ "$EUID" -ne 0 ]; then
   echo "run this command with sudo" >&2
   exit 1
 fi
+set -a
 . /etc/static-log-analysis.env
+set +a
 if [ "$SLA_DASHBOARD_ENABLED" != "true" ]; then
   echo "enable dashboard_enabled in Terraform before creating a dashboard administrator" >&2
   exit 1

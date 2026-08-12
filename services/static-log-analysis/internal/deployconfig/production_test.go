@@ -249,9 +249,15 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 		"openssl rand -base64 48",
 		"BETTER_AUTH_SECRET",
 		"dashboard-create-admin",
+		"set -a",
 	} {
 		if !strings.Contains(bootstrap, required) {
 			t.Errorf("dashboard bootstrap does not contain %q", required)
+		}
+	}
+	for _, required := range []string{"fallocate -l 2G /swapfile", "swapon /swapfile", "/swapfile none swap sw 0 0"} {
+		if !strings.Contains(bootstrap, required) {
+			t.Errorf("dashboard build memory safeguard does not contain %q", required)
 		}
 	}
 	for _, required := range []string{"reverse_proxy dashboard:3000", "Strict-Transport-Security", "X-Frame-Options"} {
