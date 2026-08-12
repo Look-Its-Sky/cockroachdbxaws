@@ -45,6 +45,14 @@ per AWS account, region, log group, and log stream. It records the last safely
 accepted source position only after corresponding records have reached the
 analysis journal.
 
+`FilterLogEvents` reads a whole log group, so the next group-wide retrieval
+window is anchored to the greatest stored stream position, then moved backward
+by the bounded lookback. Per-stream positions remain useful for native cursor
+identity and diagnostics, but an older stream that has gone quiet must not pin
+the whole group in the past. A successful exhaustive group query has already
+searched that quiet stream through the same horizon; the overlap covers bounded
+late delivery on every stream.
+
 The adapter must:
 
 - Use native CloudWatch event IDs in `record_id` construction.

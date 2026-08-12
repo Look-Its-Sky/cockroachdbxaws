@@ -881,6 +881,37 @@ func TestEachStreamKeepsItsOwnCheckpoint(t *testing.T) {
 	}
 }
 
+func TestAQuietStreamDoesNotPinTheGroupRetrievalHorizon(t *testing.T) {
+	first := cwgen.New(cwgen.ForStream("stream-a"), cwgen.WithIDBase(1))
+	second := cwgen.New(cwgen.ForStream("stream-b"), cwgen.WithIDBase(2))
+	base := fakeclock.Origin
+	h := newHarness(t,
+		first.PaymentError(cwgen.AtEventTime(base.Add(time.Minute)), cwgen.AtIngestionTime(base.Add(time.Minute))),
+		second.PaymentError(cwgen.AtEventTime(base.Add(14*time.Minute)), cwgen.AtIngestionTime(base.Add(14*time.Minute))),
+	)
+	h.clock.Advance(15 * time.Minute)
+	adapter := h.adapter(t)
+	h.poll(t, adapter)
+
+	// stream-a goes quiet. A new stream then writes ahead of stream-b's
+	// checkpoint. Because FilterLogEvents reads the whole group, stream-a's old
+	// per-stream diagnostic checkpoint must not hold every later group query in
+	// the past.
+	third := cwgen.New(cwgen.ForStream("stream-c"), cwgen.WithIDBase(3))
+	h.clock.Advance(6 * time.Minute)
+	h.source.add(third.PaymentError(
+		cwgen.AtEventTime(base.Add(20*time.Minute)), cwgen.AtIngestionTime(base.Add(20*time.Minute))))
+
+	result := h.poll(t, adapter)
+
+	if result.Delivered != 1 {
+		t.Fatalf("quiet stream pinned the group horizon: delivered %d", result.Delivered)
+	}
+	if got := h.sink.distinct(); got != 3 {
+		t.Fatalf("want all three streams represented, got %d records", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The regional boundary.
 // ---------------------------------------------------------------------------

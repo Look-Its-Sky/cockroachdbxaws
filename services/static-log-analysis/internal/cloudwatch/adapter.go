@@ -556,20 +556,22 @@ func (a *Adapter) loadCheckpoints(ctx context.Context, state *groupState) ([]Che
 
 // window returns the half-open event-time range this cycle reads.
 //
-// The start is one lookback behind the least advanced stream, floored at the
-// bounded maximum so that a stream quiet for a week cannot make every cycle
-// rescan a week. The end is bounded so that catching up after an outage
-// happens in bounded steps.
+// The start is one lookback behind the group retrieval horizon: the greatest
+// position reached by any stream in the last exhaustive group-wide query. A
+// quiet stream's older diagnostic checkpoint cannot pin FilterLogEvents in the
+// past, because that API already searched every stream in the queried group.
+// The lookback still recovers bounded late delivery on any stream. The end is
+// bounded so that catching up after an outage happens in bounded steps.
 func (a *Adapter) window(checkpoints []Checkpoint, now time.Time) (time.Time, time.Time) {
 	start := now.Add(-a.initialLookback)
 	if len(checkpoints) > 0 {
-		earliest := checkpoints[0].Position
+		latest := checkpoints[0].Position
 		for _, checkpoint := range checkpoints[1:] {
-			if checkpoint.Position.Before(earliest) {
-				earliest = checkpoint.Position
+			if checkpoint.Position.After(latest) {
+				latest = checkpoint.Position
 			}
 		}
-		start = earliest.Add(-a.lookback)
+		start = latest.Add(-a.lookback)
 	}
 	if floor := now.Add(-a.maxLookback); start.Before(floor) {
 		start = floor
