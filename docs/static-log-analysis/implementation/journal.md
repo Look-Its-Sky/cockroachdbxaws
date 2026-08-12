@@ -106,7 +106,14 @@ digest, and priority) separately from sorted live membership. Compaction and
 quarantine shrink only live membership, so an exact original-batch replay remains
 idempotent without resurrecting removed records, while changed membership or a
 changed compacted member remains an identity conflict. Batch metadata and reverse
-live-membership indexes shrink with live membership. Canonical original-membership
+live-membership indexes shrink with live membership. A quarantine tombstone
+destroys the normalized payload but retains its categorical outcome, sealed semantic
+digest, and admission priority. That fixed-size replay identity lets a source's
+ordinary overlap reread acknowledge the exact quarantined record without processing
+it again, while changed content under the same record ID remains an identity conflict.
+Legacy `JQV1` tombstones, which predate the sealed identity, adopt the first
+post-upgrade replay identity without restoring the payload and are rewritten as
+`JQV2`; every later replay is checked normally. Canonical original-membership
 indexes remain while the batch has any live member, so cross-batch redelivery is
 checked against compacted descriptors and an exact earlier-batch replay cannot
 resurrect them. Batch metadata and both index kinds are removed when the last live

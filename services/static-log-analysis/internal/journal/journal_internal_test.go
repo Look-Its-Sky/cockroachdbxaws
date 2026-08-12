@@ -420,28 +420,28 @@ func TestCorruptionMatrixRefusesReopen(t *testing.T) {
 		{
 			name: "record-and-quarantine",
 			mutate: func(t *testing.T, db *pebble.DB, cfg Config, records []model.NormalizedLog) {
-				mustSet(t, db, quarantineKey(records[0].RecordID), encodeQuarantine(records[0].RecordID, QuarantineUnsupportedData, cfg.Clock.Now(), 1))
+				mustSet(t, db, quarantineKey(records[0].RecordID), encodeLegacyQuarantine(records[0].RecordID, QuarantineUnsupportedData, cfg.Clock.Now(), 1))
 			},
 		},
 		{
 			name: "invalid-quarantine-attempt",
 			mutate: func(t *testing.T, db *pebble.DB, cfg Config, _ []model.NormalizedLog) {
 				id := strings.Repeat("a", 64)
-				mustSet(t, db, quarantineKey(id), encodeQuarantine(id, QuarantineUnsupportedData, cfg.Clock.Now(), 0))
+				mustSet(t, db, quarantineKey(id), encodeLegacyQuarantine(id, QuarantineUnsupportedData, cfg.Clock.Now(), 0))
 			},
 		},
 		{
 			name: "invalid-quarantine-time",
 			mutate: func(t *testing.T, db *pebble.DB, _ Config, _ []model.NormalizedLog) {
 				id := strings.Repeat("a", 64)
-				mustSet(t, db, quarantineKey(id), encodeQuarantine(id, QuarantineUnsupportedData, time.Time{}, 1))
+				mustSet(t, db, quarantineKey(id), encodeLegacyQuarantine(id, QuarantineUnsupportedData, time.Time{}, 1))
 			},
 		},
 		{
 			name: "invalid-quarantine-key-identity",
 			mutate: func(t *testing.T, db *pebble.DB, cfg Config, records []model.NormalizedLog) {
 				otherID := strings.Repeat("a", 64)
-				mustSet(t, db, quarantineKey(otherID), encodeQuarantine(records[0].RecordID, QuarantineUnsupportedData, cfg.Clock.Now(), 1))
+				mustSet(t, db, quarantineKey(otherID), encodeLegacyQuarantine(records[0].RecordID, QuarantineUnsupportedData, cfg.Clock.Now(), 1))
 			},
 		},
 		{
@@ -840,6 +840,43 @@ func openPendingRecord(t *testing.T) (*Journal, Config, model.NormalizedLog) {
 	t.Helper()
 	j, cfg, records, _ := openPendingBatch(t, 1)
 	return j, cfg, records[0]
+}
+
+func TestLegacyQuarantineSealsFirstReplayWithoutRestoringPayload(t *testing.T) {
+	j, cfg, record := openPendingRecord(t)
+	defer j.Close()
+	claims, err := j.Claim(1, "worker")
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim: %v %+v", err, claims)
+	}
+	if err := j.Quarantine(record.RecordID, claims[0].Token, QuarantineDeterministicProcessing); err != nil {
+		t.Fatal(err)
+	}
+	current, err := decodeQuarantine(mustGet(t, j.db, quarantineKey(record.RecordID)))
+	if err != nil || current.legacy {
+		t.Fatalf("current quarantine: %+v %v", current, err)
+	}
+	mustSet(t, j.db, quarantineKey(record.RecordID), encodeLegacyQuarantine(
+		record.RecordID, current.reason, current.at, current.attempt))
+
+	replay := record
+	replay.BatchID = "0194f0a0-0000-7000-8000-0000000000f1"
+	replay.Source.ReceivedAt = record.Source.ReceivedAt.Add(time.Second)
+	if err := j.AppendBatch(replay.BatchID, []Admission{{Record: replay, Priority: PriorityHigh}}); err != nil {
+		t.Fatalf("upgrade legacy quarantine: %v", err)
+	}
+	upgraded, err := decodeQuarantine(mustGet(t, j.db, quarantineKey(record.RecordID)))
+	if err != nil || upgraded.legacy || upgraded.priority != PriorityHigh {
+		t.Fatalf("upgraded quarantine: %+v %v", upgraded, err)
+	}
+	want, err := NewReplayIdentity(replay, cfg.TenantID, cfg.Classification, PriorityHigh)
+	if err != nil || upgraded.semantic != want.Digest() {
+		t.Fatalf("legacy replay identity was not sealed: %v", err)
+	}
+	stats, err := j.Stats()
+	if err != nil || stats.Quarantined != 1 || stats.Pending+stats.Claimed+stats.Committed != 0 {
+		t.Fatalf("legacy replay restored payload: %v %+v", err, stats)
+	}
 }
 
 func mustDecodeBatch(t *testing.T, db *pebble.DB, batchID string) storedBatch {

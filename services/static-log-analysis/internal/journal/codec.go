@@ -389,7 +389,33 @@ func decodeStrings(data []byte, magic string) ([]string, error) {
 	return out, nil
 }
 
-func encodeQuarantine(recordID string, reason QuarantineReason, at time.Time, attempt uint32) []byte {
+type quarantineMetadata struct {
+	recordID string
+	reason   QuarantineReason
+	at       time.Time
+	attempt  uint32
+	semantic [32]byte
+	priority Priority
+	legacy   bool
+}
+
+func encodeQuarantine(recordID string, reason QuarantineReason, at time.Time, attempt uint32, semantic [32]byte, priority Priority) []byte {
+	present := byte(0)
+	if !at.IsZero() {
+		present = 1
+	}
+	payload := []byte{byte(reason), present}
+	payload = binary.BigEndian.AppendUint64(payload, uint64(at.UnixNano()))
+	payload = binary.BigEndian.AppendUint32(payload, attempt)
+	payload = append(payload, byte(priority))
+	payload = append(payload, semantic[:]...)
+	payload = appendBytes(payload, []byte(recordID))
+	return checked([]byte("JQV2"), payload)
+}
+
+// encodeLegacyQuarantine exists only for opening and explicitly migrating
+// journals written before quarantine tombstones retained replay identity.
+func encodeLegacyQuarantine(recordID string, reason QuarantineReason, at time.Time, attempt uint32) []byte {
 	present := byte(0)
 	if !at.IsZero() {
 		present = 1
@@ -400,22 +426,42 @@ func encodeQuarantine(recordID string, reason QuarantineReason, at time.Time, at
 	payload = appendBytes(payload, []byte(recordID))
 	return checked([]byte("JQV1"), payload)
 }
-func decodeQuarantine(data []byte) (string, QuarantineReason, time.Time, uint32, error) {
-	payload, ok := unchecked(data, "JQV1")
-	if !ok || len(payload) < 15 || payload[1] != 1 {
-		return "", 0, time.Time{}, 0, errDecode
+
+func decodeQuarantine(data []byte) (quarantineMetadata, error) {
+	payload, current := unchecked(data, "JQV2")
+	legacy := false
+	if !current {
+		payload, legacy = unchecked(data, "JQV1")
+	}
+	minimum := 48
+	if legacy {
+		minimum = 15
+	}
+	if (!current && !legacy) || len(payload) < minimum || payload[1] != 1 {
+		return quarantineMetadata{}, errDecode
 	}
 	reason := QuarantineReason(payload[0])
 	if reason < QuarantineInvalidNormalizedRecord || reason > QuarantineUnsupportedData {
-		return "", 0, time.Time{}, 0, errDecode
+		return quarantineMetadata{}, errDecode
 	}
 	at := time.Unix(0, int64(binary.BigEndian.Uint64(payload[2:10]))).UTC()
 	attempt := binary.BigEndian.Uint32(payload[10:14])
-	id, rest, validID := takeBytes(payload[14:])
-	if !validJournalTime(at) || attempt == 0 || !validID || len(rest) != 0 || !validRecordID(string(id)) {
-		return "", 0, time.Time{}, 0, errDecode
+	metadata := quarantineMetadata{reason: reason, at: at, attempt: attempt, legacy: legacy}
+	rest := payload[14:]
+	if !legacy {
+		metadata.priority = Priority(rest[0])
+		copy(metadata.semantic[:], rest[1:33])
+		rest = rest[33:]
 	}
-	return string(id), reason, at, attempt, nil
+	id, rest, validID := takeBytes(rest)
+	if !validJournalTime(at) || attempt == 0 || !validID || len(rest) != 0 || !validRecordID(string(id)) {
+		return quarantineMetadata{}, errDecode
+	}
+	if !legacy && metadata.priority > PriorityLow {
+		return quarantineMetadata{}, errDecode
+	}
+	metadata.recordID = string(id)
+	return metadata, nil
 }
 
 func timeProto(t time.Time) *timestamppb.Timestamp {

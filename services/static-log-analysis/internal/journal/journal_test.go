@@ -243,7 +243,7 @@ func TestDatabaseCommitJournalUpdateGapReplaysAfterReopen(t *testing.T) {
 	}
 }
 
-func TestQuarantinePersistsOnlyCategoricalMetadataAndRejectsStaleClaim(t *testing.T) {
+func TestQuarantinePersistsSafeTombstoneMetadataAndRejectsStaleClaim(t *testing.T) {
 	h := newHarness(t)
 	j := h.open()
 	r := h.one()
@@ -265,6 +265,49 @@ func TestQuarantinePersistsOnlyCategoricalMetadataAndRejectsStaleClaim(t *testin
 	stats, _ = j.Stats()
 	if stats.Quarantined != 1 {
 		t.Fatalf("quarantine lost: %+v", stats)
+	}
+}
+
+func TestQuarantinedRecordAcknowledgesExactReplayWithoutResurrection(t *testing.T) {
+	h := newHarness(t)
+	j := h.open()
+	record := h.one()
+	if err := j.AppendBatch(record.BatchID, []journal.Admission{{Record: record, Priority: journal.PriorityNormal}}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := j.Claim(1, "worker")
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim: %v %+v", err, claims)
+	}
+	if err := j.Quarantine(record.RecordID, claims[0].Token, journal.QuarantineDeterministicProcessing); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	j = h.open()
+	defer j.Close()
+	replay := record
+	replay.BatchID = h.one().BatchID
+	replay.Source.ReceivedAt = h.clock.Now().Add(time.Second)
+	if err := j.AppendBatch(replay.BatchID, []journal.Admission{{Record: replay, Priority: journal.PriorityNormal}}); err != nil {
+		t.Fatalf("exact replay of quarantined record: %v", err)
+	}
+	stats, err := j.Stats()
+	if err != nil || stats.Quarantined != 1 || stats.Pending+stats.Claimed+stats.Committed != 0 {
+		t.Fatalf("replay resurrected quarantined payload: %v %+v", err, stats)
+	}
+	if claimed, err := j.Claim(1, "worker"); err != nil || len(claimed) != 0 {
+		t.Fatalf("quarantined replay became claimable: %v %+v", err, claimed)
+	}
+
+	conflict := replay
+	conflict.BatchID = h.one().BatchID
+	conflict.Source.ReceivedAt = h.clock.Now().Add(2 * time.Second)
+	conflict.Body = model.SafeString("changed content under a quarantined identity")
+	if err := j.AppendBatch(conflict.BatchID, []journal.Admission{{Record: conflict, Priority: journal.PriorityNormal}}); !errors.Is(err, journal.ErrDuplicateConflict) {
+		t.Fatalf("changed quarantined replay was not rejected: %v", err)
 	}
 }
 

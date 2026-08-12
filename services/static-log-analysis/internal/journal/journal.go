@@ -535,6 +535,7 @@ func (j *Journal) AppendBatch(batchID string, admissions []Admission) error {
 		return nil
 	}
 	m := newMutation(j)
+	live := make([]string, 0, len(ids))
 	for _, id := range ids {
 		p := unique[id]
 		historyCount, err := j.validateHistoricalIdentity(id, p.semantic, p.admission.Priority)
@@ -547,7 +548,6 @@ func (j *Journal) AppendBatch(batchID string, admissions []Admission) error {
 		if historyCount >= j.cfg.MaxBatchRefs {
 			return ErrCapacity
 		}
-		m.set(batchOriginalRefKey(id, batchID), []byte{})
 		stored, found, err := j.loadRecord(id)
 		if err != nil {
 			return j.corrupt()
@@ -564,12 +564,29 @@ func (j *Journal) AppendBatch(batchID string, admissions []Admission) error {
 				return ErrCapacity
 			}
 			m.set(batchRefKey(id, batchID), []byte{})
+			live = append(live, id)
 			continue
 		}
-		if _, quarantined, err := get(j.db, quarantineKey(id)); err != nil {
+		quarantineValue, quarantined, err := get(j.db, quarantineKey(id))
+		if err != nil {
 			return j.corrupt()
-		} else if quarantined {
-			return ErrDuplicateConflict
+		}
+		if quarantined {
+			metadata, err := decodeQuarantine(quarantineValue)
+			if err != nil || metadata.recordID != id {
+				return j.corrupt()
+			}
+			if metadata.legacy {
+				// JQV1 destroyed the payload without retaining replay identity.
+				// The first post-upgrade replay seals the only identity still
+				// available, but never resurrects or processes the record.
+				m.set(quarantineKey(id), encodeQuarantine(id, metadata.reason, metadata.at, metadata.attempt, p.semantic, p.admission.Priority))
+				continue
+			}
+			if metadata.semantic != p.semantic || metadata.priority != p.admission.Priority {
+				return ErrDuplicateConflict
+			}
+			continue
 		}
 		received := p.admission.Record.Source.ReceivedAt
 		stored = storedRecord{state: StatePending, priority: p.admission.Priority, received: received, semantic: p.semantic, envelope: p.encoded}
@@ -578,13 +595,19 @@ func (j *Journal) AppendBatch(batchID string, admissions []Admission) error {
 		m.set(batchRefKey(id, batchID), []byte{})
 		m.set(transitionReserveKey(id), reserveValue())
 		m.addPriority(stored.priority, 1)
+		live = append(live, id)
 	}
-	batch := storedBatch{original: make([]storedBatchMember, 0, len(ids)), live: append([]string(nil), ids...)}
+	batch := storedBatch{original: make([]storedBatchMember, 0, len(ids)), live: live}
 	for _, id := range ids {
 		prepared := unique[id]
 		batch.original = append(batch.original, storedBatchMember{recordID: id, priority: prepared.admission.Priority, semantic: prepared.semantic})
 	}
-	m.set(batchKey(batchID), encodeBatch(batch))
+	if len(batch.live) > 0 {
+		for _, id := range ids {
+			m.set(batchOriginalRefKey(id, batchID), []byte{})
+		}
+		m.set(batchKey(batchID), encodeBatch(batch))
+	}
 	m.set(keyFormat, formatValue())
 	return j.commitMutation(m, true)
 }
@@ -914,7 +937,7 @@ func (j *Journal) Quarantine(recordID, token string, reason QuarantineReason) er
 	if err := j.removeBatchRefs(m, recordID); err != nil {
 		return j.corrupt()
 	}
-	m.set(quarantineKey(recordID), encodeQuarantine(recordID, reason, now, stored.attempt))
+	m.set(quarantineKey(recordID), encodeQuarantine(recordID, reason, now, stored.attempt, stored.semantic, stored.priority))
 	return j.commitMutation(m, false)
 }
 
@@ -1661,8 +1684,8 @@ func (j *Journal) verify() error {
 			if !ok || len(rest) != 0 || !validRecordID(id) {
 				return errDecode
 			}
-			valueID, _, _, _, err := decodeQuarantine(v)
-			if err != nil || valueID != id {
+			metadata, err := decodeQuarantine(v)
+			if err != nil || metadata.recordID != id {
 				return errDecode
 			}
 			if quarantines[id] {

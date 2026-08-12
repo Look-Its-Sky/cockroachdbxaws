@@ -61,7 +61,9 @@ topology before it claims new work. Pending and claimed records warm topology an
 remain eligible for normal journal processing; committed records warm topology
 but are never re-persisted. Quarantined records have no retained payload and are
 excluded by construction. Journal startup's full scrub still validates their
-categorical quarantine metadata.
+categorical outcome and fixed-size sealed replay identity. The digest and admission
+priority are retained only so an exact source overlap can be acknowledged without
+resurrecting the record; changed content under that identity remains a conflict.
 
 A retained record the rule engine cannot observe is skipped and counted, never
 fatal. Such a record was admitted and durably acknowledged by design, so
