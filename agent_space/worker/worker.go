@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"agent_space/agent"
 	"agent_space/incident"
+	"agent_space/remediation"
 	"agent_space/utils/queue"
 )
 
@@ -36,6 +38,12 @@ type ContextResolver interface {
 	Resolve(ctx context.Context, a queue.Assignment) (incident.Context, error)
 }
 
+// where a verdict goes next. Accepting or refusing has to be immediate: this is
+// called on the receive loop, and proposing fixes is minutes of container time.
+type Remediator interface {
+	Enqueue(req remediation.Request) bool
+}
+
 // Worker polls one queue and investigates one message at a time.
 type Worker struct {
 	Queue    queue.Receiver
@@ -43,6 +51,9 @@ type Worker struct {
 	Agent    Investigator
 	Results  *Store
 	Config   queue.Config
+	// Remediation proposes fixes for a verdict. Nil stops at the verdict, which
+	// is what running without a container runtime looks like.
+	Remediation Remediator
 
 	// how many past incidents to recall per run; 0 uses the agent's default
 	Sources int
@@ -164,7 +175,56 @@ func (w *Worker) handle(ctx context.Context, msg queue.Message) {
 	log.Printf("worker: %s: done in %d iterations, %d sources%s",
 		a, res.Iterations, res.Sources, truncatedNote(res.Truncated))
 	w.Results.Finish(a, res, nil)
+
+	// acknowledged before the handoff, never after. Remediation is N containers
+	// at a fifteen-minute ceiling each and the run budget here is ten minutes
+	// total; holding the message for it would stop the queue being consumed
+	// while the detector upstream keeps producing.
 	w.ack(msg)
+	w.remediate(a, inc, res)
+}
+
+// hand the verdict to the remediation pool, if there is one.
+//
+// Everything here is best effort by construction. The verdict is already
+// persisted and the message is already gone, so a refused or dropped handoff
+// costs the fixes and nothing else.
+func (w *Worker) remediate(a queue.Assignment, inc incident.Context, res agent.Result) {
+	if w.Remediation == nil {
+		return
+	}
+
+	// a run that never named a commit gives triage nothing to read, and a
+	// rollback is not a code change, so neither is worth a container
+	if !res.Verdict.Decided() {
+		log.Printf("worker: %s: no decision was reached, not proposing fixes", a)
+		return
+	}
+	if res.Verdict.Decision != agent.DecisionHotfix {
+		log.Printf("worker: %s: verdict is %s, which is not a code change; not proposing fixes",
+			a, res.Verdict.Decision)
+		return
+	}
+
+	if w.Remediation.Enqueue(remediation.Request{
+		InvestigationID: a.InvestigationID,
+		IncidentID:      a.IncidentID,
+		ServiceID:       first(inc.ServiceID, a.ServiceID, res.Verdict.Service),
+		IncidentSummary: incident.BuildQuestion(a, inc),
+		VerdictAnswer:   res.Answer,
+		CommitSHA:       res.Verdict.CommitSHA,
+	}) {
+		log.Printf("worker: %s: handed to remediation", a)
+	}
+}
+
+func first(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // renew the lease while a run is in flight. Without this a run measured at 66s

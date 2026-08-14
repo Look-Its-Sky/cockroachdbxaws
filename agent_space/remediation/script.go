@@ -49,7 +49,7 @@ func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 	b.WriteString("set -u\n")
 	b.WriteString("export GIT_TERMINAL_PROMPT=0\n")
 
-	stage(&b, stageClone, cloneCommand(repo, cloneURL)+"\n"+fetchCommitCommand(sha))
+	stage(&b, stageClone, cloneStageCommand(repo, cloneURL, sha))
 
 	b.WriteString(fmt.Sprintf("cd %s || exit 97\n", shellQuote(repo.WorkingDir())))
 
@@ -59,13 +59,21 @@ func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 	b.WriteString("git config --global --add safe.directory /workspace\n")
 
 	stage(&b, stageHarness, harnessCommand)
+
+	// Taken immediately after the harness and before anything is installed or
+	// built, so the diff is what the model changed and nothing else. Run last
+	// it would sweep in whatever `npm ci` and the build left lying around.
+	//
+	// From the repository root, so a change outside the service directory is
+	// still captured; staged first, because `git diff` alone does not show a
+	// file the model created, and creating one is something ApplyCommand
+	// explicitly allows. Paths the repository ignores stay ignored, which is
+	// the right answer for node_modules and the wrong one nowhere that matters.
+	stage(&b, stageDiff, "git -C /workspace add -A && git -C /workspace --no-pager diff --cached")
+
 	stageIf(&b, stageSetup, repo.SetupCommand)
 	stageIf(&b, stageBuild, repo.BuildCommand)
 	stageIf(&b, stageTest, repo.TestCommand)
-
-	// last, and from the repository root, so a change outside the service
-	// directory is still captured rather than silently dropped
-	stage(&b, stageDiff, "git -C /workspace --no-pager diff")
 
 	return b.String()
 }
@@ -80,6 +88,22 @@ func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 // older than the depth is still readable.
 const CloneDepth = 100
 
+// the whole clone stage: clone, reach the implicated commit, then report
+// whether there is actually a checkout to work with.
+//
+// That last check is the point of this existing at all. The fetch fallbacks
+// deliberately end in `|| echo`, so a commit that cannot be reached is a
+// finding rather than a dead run — but a stage's exit code is its last
+// command's, so without a final test a *total* clone failure still reports
+// success. It did exactly that: node:22-alpine ships no git, and the clone
+// stage came back exit 0 with "git: not found" as its output, which
+// Runner.candidate reads as a good checkout.
+func cloneStageCommand(repo Repository, cloneURL, sha string) string {
+	return cloneCommand(repo, cloneURL) + "\n" +
+		fetchCommitCommand(sha) + "\n" +
+		"[ -d /workspace/.git ]"
+}
+
 // a bounded clone of one branch.
 //
 // Not --filter=blob:none: a blobless clone is smaller up front but resolves
@@ -93,17 +117,53 @@ func cloneCommand(repo Repository, cloneURL string) string {
 		CloneDepth, shellQuote(repo.DefaultBranch), shellQuote(cloneURL))
 }
 
+// how much further back to reach when the implicated commit is abbreviated and
+// the depth clone did not already contain it. Five times CloneDepth: enough to
+// cover months of this repository, and still far short of cloning it whole.
+const deepenBy = 5 * CloneDepth
+
 // guarantee one commit is present regardless of the clone depth.
 //
-// GitHub serves a fetch by SHA, so a culprit 500 commits back costs one extra
-// object rather than 500. Deliberately tolerant of failure: a commit that
-// cannot be fetched is a finding for triage to report, not a reason to abandon
-// the run before it has looked at anything.
+// A **full** object name can be fetched directly, so a culprit 500 commits back
+// costs one extra object rather than 500. An abbreviated one cannot:
+// `git fetch origin 0c6f0ae` fails with "couldn't find remote ref", because the
+// protocol has no way to resolve a short name on the server. Verified against
+// the fork on 2026-08-12, and it matters because the deploys table stores
+// seven characters — so this is the common case, not the exotic one.
+//
+// For a short SHA the fallback is to deepen, and only when the clone did not
+// already reach it, which for the seeded culprits it does.
+//
+// Deliberately tolerant of failure throughout: a commit that cannot be reached
+// is a finding for triage to report, not a reason to abandon the run before it
+// has looked at anything.
 func fetchCommitCommand(sha string) string {
 	quoted := shellQuote(sha)
+
+	if isFullSHA(sha) {
+		return fmt.Sprintf(
+			"git -C /workspace fetch --depth 1 origin %s 2>&1 || echo 'could not fetch %s'",
+			quoted, quoted)
+	}
+
 	return fmt.Sprintf(
-		"git -C /workspace fetch --depth 1 origin %s 2>&1 || echo 'could not fetch %s'",
-		quoted, quoted)
+		"git -C /workspace cat-file -e %s^{commit} 2>/dev/null || "+
+			"git -C /workspace fetch --deepen %d 2>&1 || echo 'could not deepen to reach %s'",
+		quoted, deepenBy, quoted)
+}
+
+// a full 40-character object name, which is the only thing a server will
+// resolve in a fetch
+func isFullSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
+	}
+	for _, r := range sha {
+		if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // emit one delimited stage

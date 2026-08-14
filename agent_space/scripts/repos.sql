@@ -20,17 +20,30 @@ UPSERT INTO service_repositories
 VALUES
     -- Go, and the only service here with a real test (money/money_test.go).
     -- Prefer this one for a demo: hermetic, fast, and the strong signal exists.
+    --
+    -- golang:1.25, not 1.24: src/checkout/go.mod requires go >= 1.25.0, and the
+    -- official Go images pin GOTOOLCHAIN=local, so an older image cannot fetch
+    -- a newer toolchain to compensate. On 1.24 every candidate failed to build
+    -- with "go.mod requires go >= 1.25.0", found by cmd/sandboxcheck.
     ('checkout', 'Look-Its-Sky', 'opentelemetry-demo-auto-sre-test', 'main',
-     'src/checkout', 'golang:1.24',
+     'src/checkout', 'golang:1.25',
      '', 'go build ./...', 'go test ./...', now()),
 
     -- Node, and there is nothing to test: package.json declares only `start`.
     -- The empty test command is the honest answer, and HasTests() reports it.
+    --
+    -- node:22, not node:22-alpine: the sandbox clones the repository inside the
+    -- container, and alpine ships no git. On alpine the clone produced nothing
+    -- but "git: not found", found by cmd/sandboxcheck.
     ('payment', 'Look-Its-Sky', 'opentelemetry-demo-auto-sre-test', 'main',
-     'src/payment', 'node:22-alpine',
+     'src/payment', 'node:22',
      'npm ci --omit=dev', 'node --check index.js && node --check charge.js', '', now()),
 
     -- .NET, included so the picker has a third entry; unverified beyond build.
+    --
+    -- sdk:10.0, not sdk:9.0: src/cart targets net10.0, and a 9.0 SDK refuses it
+    -- with NETSDK1045 rather than falling back. Same class of mistake as
+    -- checkout on golang:1.24 — the image has to be new enough for the service.
     ('cart', 'Look-Its-Sky', 'opentelemetry-demo-auto-sre-test', 'main',
-     'src/cart', 'mcr.microsoft.com/dotnet/sdk:9.0',
+     'src/cart', 'mcr.microsoft.com/dotnet/sdk:10.0',
      '', 'dotnet build', '', now());

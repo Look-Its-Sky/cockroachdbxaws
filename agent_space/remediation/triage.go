@@ -80,7 +80,7 @@ func BuildTriageScript(repo Repository, cloneURL, sha string) string {
 
 	// the implicated commit is very often older than the clone depth — the
 	// seeded checkout culprit is 67 commits back — so it is fetched by name
-	stage(&b, stageClone, cloneCommand(repo, cloneURL)+"\n"+fetchCommitCommand(sha))
+	stage(&b, stageClone, cloneStageCommand(repo, cloneURL, sha))
 	b.WriteString("cd /workspace || exit 97\n")
 	b.WriteString("git config --global --add safe.directory /workspace\n")
 

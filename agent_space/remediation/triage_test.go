@@ -207,11 +207,24 @@ func TestBuildTriageScriptBoundsHistoryButFetchesTheCommit(t *testing.T) {
 		t.Errorf("expected a bounded clone at depth %d", CloneDepth)
 	}
 
-	// but the implicated commit is very often outside it — the seeded checkout
-	// culprit is 67 commits back — so it has to be fetched by name, or triage
-	// reports commit_missing for a commit that plainly exists
-	if !strings.Contains(script, "fetch --depth 1 origin '0c6f0ae'") {
-		t.Errorf("the implicated commit is not fetched explicitly:\n%s", script)
+	// The implicated commit is very often outside that budget — the seeded
+	// checkout culprit is 67 commits back — so the clone alone is not enough.
+	//
+	// It cannot be fetched by name here, though: '0c6f0ae' is abbreviated, and
+	// a server will not resolve a short object name in a fetch. Deepening is
+	// the only route, and it is conditional so the usual case pays nothing.
+	if !strings.Contains(script, "--deepen") {
+		t.Errorf("nothing reaches a commit past the clone depth:\n%s", script)
+	}
+	if strings.Contains(script, "fetch --depth 1 origin '0c6f0ae'") {
+		t.Errorf("an abbreviated SHA is fetched by name, which always fails:\n%s", script)
+	}
+
+	// a full object name, by contrast, is one extra object rather than 400
+	full := BuildTriageScript(checkoutRepo(), "https://github.com/o/r.git",
+		"0c6f0ae70920e87405ab44d1e3a160bce1d4e82c")
+	if !strings.Contains(full, "fetch --depth 1 origin '0c6f0ae70920e87405ab44d1e3a160bce1d4e82c'") {
+		t.Errorf("a full SHA is not fetched explicitly:\n%s", full)
 	}
 }
 

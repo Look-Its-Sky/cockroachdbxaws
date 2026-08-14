@@ -69,6 +69,41 @@ func (r *Resolver) Resolve(ctx context.Context, a queue.Assignment) (Context, er
 	return c, nil
 }
 
+// Latest returns the newest context recorded for an incident, whatever version
+// that is.
+//
+// Resolve is keyed by version because an assignment names the version it was
+// raised against. This is for the other direction: a person asking the API to
+// remediate an investigation that finished hours ago, where the version the
+// message carried is long gone and the current view is the right one.
+func (r *Resolver) Latest(ctx context.Context, incidentID string) (Context, error) {
+	if r == nil || r.Pool == nil {
+		return Context{}, errors.New("incident: no database pool configured")
+	}
+
+	const q = `
+		SELECT incident_id, context_version, service_id, environment,
+		       severity, summary, log_excerpt, detected_at
+		FROM incident_context
+		WHERE incident_id = $1
+		ORDER BY context_version DESC
+		LIMIT 1`
+
+	var c Context
+	err := r.Pool.QueryRow(ctx, q, incidentID).Scan(
+		&c.IncidentID, &c.ContextVersion, &c.ServiceID, &c.Environment,
+		&c.Severity, &c.Summary, &c.LogExcerpt, &c.DetectedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Context{}, fmt.Errorf("%w: incident %s", ErrNotFound, incidentID)
+	}
+	if err != nil {
+		return Context{}, fmt.Errorf("incident: read latest context: %w", err)
+	}
+
+	return c, nil
+}
+
 // render the question for agent.Runner.Run.
 //
 // This states the facts and stops. What to do with them — find the commit,

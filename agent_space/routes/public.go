@@ -8,6 +8,8 @@ import (
 	"github.com/tmc/langchaingo/vectorstores"
 
 	"agent_space/agent"
+	"agent_space/incident"
+	"agent_space/remediation"
 	"agent_space/utils/mcp"
 	"agent_space/worker"
 )
@@ -21,6 +23,16 @@ var (
 	SREAgent    *agent.Runner
 	// verdicts from the SQS worker; nil when no queue is configured
 	Results *worker.Store
+
+	// the remediation half. Each is nil when its prerequisite is missing — no
+	// container runtime, no database, no GitHub token — and the routes that
+	// need one say which is absent rather than failing obscurely.
+	Remediation *remediation.Runner
+	Solutions   *remediation.Solutions
+	Repos       *remediation.Repositories
+	Publisher   *remediation.Publisher
+	// reads incident prose back for a remediation started from the API
+	Incidents *incident.Resolver
 )
 
 const mcpUnavailable = "CockroachDB MCP is not configured. Check if COCKROACH_API_KEY is set"

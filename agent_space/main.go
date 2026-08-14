@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent_space/incident"
 	"agent_space/routes"
 	"agent_space/utils"
 )
@@ -29,6 +30,8 @@ func main() {
 	defer mcpSess.Close()
 
 	initRepositories()
+	// before the worker: the worker only hands verdicts over if this came up
+	initRemediation()
 	initWorker()
 
 	routes.VectorStore = store
@@ -36,8 +39,17 @@ func main() {
 	routes.MCPSession = mcpSess
 	routes.SREAgent = sreAgent
 	routes.Results = sqsResults
+	routes.Remediation = remediator
+	routes.Solutions = solutions
+	routes.Repos = repos
+	routes.Publisher = publisher
+	routes.Incidents = incident.NewResolver(pool)
 
 	router := gin.Default()
+
+	// before everything, including /ping: a preflight the frontend sends to a
+	// route that does not exist still has to be answered
+	router.Use(utils.CORS())
 
 	guarded := router.Group("", utils.RequireToken())
 
@@ -50,6 +62,13 @@ func main() {
 	guarded.POST("/agent", routes.Agent)
 	guarded.GET("/agent/:id", routes.Investigation)
 
+	// the remediation half, which is what the frontend is built on
+	guarded.GET("/repositories", routes.Repositories)
+	guarded.GET("/remediations", routes.Remediations)
+	guarded.GET("/agent/:id/remediation", routes.RemediationFor)
+	guarded.POST("/agent/:id/remediation", routes.StartRemediation)
+	guarded.POST("/solutions/:candidate/pr", routes.OpenPullRequest)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -59,6 +78,12 @@ func main() {
 	// draining HTTP at the same moment
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// the remediation pool outlives any one message: it is started here so its
+	// jobs are bounded by the process, not by an SQS visibility timeout
+	if remediator != nil {
+		remediator.Start(ctx)
+	}
 
 	workerDone := make(chan struct{})
 	if sqsWorker != nil {

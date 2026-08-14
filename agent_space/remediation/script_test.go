@@ -8,7 +8,7 @@ import (
 func TestBuildScriptStagesInOrder(t *testing.T) {
 	script := BuildScript(paymentRepo(), "https://github.com/o/r.git", "0c6f0ae", "opencode run 'fix it'")
 
-	want := []string{stageClone, stageHarness, stageSetup, stageBuild, stageDiff}
+	want := []string{stageClone, stageHarness, stageDiff, stageSetup, stageBuild}
 	last := -1
 	for _, stage := range want {
 		at := strings.Index(script, sectionBegin+stage)
@@ -25,9 +25,32 @@ func TestBuildScriptStagesInOrder(t *testing.T) {
 	if strings.Contains(script, sectionBegin+stageTest) {
 		t.Error("a test stage was emitted for a service with no test command")
 	}
-	// and the diff must come last, after everything that could change files
-	if strings.LastIndex(script, sectionBegin+stageDiff) < strings.Index(script, sectionBegin+stageBuild) {
-		t.Error("the diff is taken before the build")
+}
+
+// `npm ci` and a build leave files behind. Diffing after them would present
+// dependencies and build output to a reviewer as though the model wrote them.
+func TestBuildScriptDiffsBeforeAnythingIsInstalledOrBuilt(t *testing.T) {
+	script := BuildScript(paymentRepo(), "https://github.com/o/r.git", "0c6f0ae", "harness")
+
+	diffAt := strings.Index(script, sectionBegin+stageDiff)
+	setupAt := strings.Index(script, sectionBegin+stageSetup)
+	buildAt := strings.Index(script, sectionBegin+stageBuild)
+
+	if diffAt > setupAt || diffAt > buildAt {
+		t.Error("the diff is taken after setup or build, so it can capture their leavings")
+	}
+}
+
+// `git diff` alone shows nothing for a file the model created, and creating
+// one is something ApplyCommand explicitly allows
+func TestBuildScriptDiffIncludesNewFiles(t *testing.T) {
+	script := BuildScript(checkoutRepo(), "https://github.com/o/r.git", "0c6f0ae", "harness")
+
+	if !strings.Contains(script, "git -C /workspace add -A") {
+		t.Error("the diff stage does not stage changes, so a new file would be invisible")
+	}
+	if !strings.Contains(script, "diff --cached") {
+		t.Error("the diff is not taken from the index it just staged")
 	}
 }
 
@@ -68,6 +91,73 @@ func TestBuildScriptRunsInTheServiceDirectory(t *testing.T) {
 	// service directory are still captured
 	if !strings.Contains(script, "git -C /workspace --no-pager diff") {
 		t.Error("the diff is not taken from the repository root")
+	}
+}
+
+// a server cannot resolve an abbreviated object name in a fetch, and the
+// deploys table stores seven characters
+func TestFetchCommitCommandHandlesShortAndFullSHAs(t *testing.T) {
+	const full = "0c6f0ae70920e87405ab44d1e3a160bce1d4e82c"
+
+	if got := fetchCommitCommand(full); !strings.Contains(got, "fetch --depth 1 origin") {
+		t.Errorf("a full SHA is not fetched directly: %s", got)
+	}
+
+	short := fetchCommitCommand("0c6f0ae")
+	if strings.Contains(short, "fetch --depth 1 origin") {
+		t.Errorf("an abbreviated SHA is fetched by name, which always fails: %s", short)
+	}
+	if !strings.Contains(short, "--deepen") {
+		t.Errorf("an abbreviated SHA has no fallback for a commit past the clone depth: %s", short)
+	}
+	// and the deepen only fires when the clone did not already reach it
+	if !strings.Contains(short, "cat-file -e") {
+		t.Errorf("the deepen is unconditional: %s", short)
+	}
+}
+
+// A stage's exit code is its last command's, and the fetch fallbacks all end in
+// `|| echo`. Without a final test the clone stage reports success even when git
+// is absent entirely — which is what node:22-alpine did, and what
+// Runner.candidate reads as a good checkout before proceeding on nothing.
+func TestCloneStageReportsWhetherThereIsACheckout(t *testing.T) {
+	for _, sha := range []string{"0c6f0ae", "0c6f0ae70920e87405ab44d1e3a160bce1d4e82c"} {
+		got := cloneStageCommand(checkoutRepo(), "https://github.com/o/r.git", sha)
+
+		if !strings.HasSuffix(strings.TrimSpace(got), "[ -d /workspace/.git ]") {
+			t.Errorf("the clone stage for %q does not end by checking the checkout exists:\n%s", sha, got)
+		}
+	}
+
+	// and every script that clones goes through it
+	for name, script := range map[string]string{
+		"BuildScript":        BuildScript(checkoutRepo(), "https://github.com/o/r.git", "0c6f0ae", "harness"),
+		"BuildTriageScript":  BuildTriageScript(checkoutRepo(), "https://github.com/o/r.git", "0c6f0ae"),
+		"BuildInspectScript": BuildInspectScript(checkoutRepo(), "https://github.com/o/r.git", "0c6f0ae", []string{"a.go"}),
+	} {
+		if !strings.Contains(script, "[ -d /workspace/.git ]") {
+			t.Errorf("%s can report a successful clone with no checkout", name)
+		}
+	}
+}
+
+func TestIsFullSHA(t *testing.T) {
+	tests := []struct {
+		sha  string
+		want bool
+	}{
+		{"0c6f0ae70920e87405ab44d1e3a160bce1d4e82c", true},
+		{"0c6f0ae", false},
+		{"", false},
+		// 40 characters, but not all hex
+		{"0c6f0ae70920e87405ab44d1e3a160bce1d4e82z", false},
+		{"0C6F0AE70920E87405AB44D1E3A160BCE1D4E82C", false},
+	}
+
+	for _, tc := range tests {
+		if got := isFullSHA(tc.sha); got != tc.want {
+			t.Errorf("isFullSHA(%q) = %v, want %v", tc.sha, got, tc.want)
+		}
 	}
 }
 

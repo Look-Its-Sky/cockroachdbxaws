@@ -5,10 +5,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
-    # The cluster is CockroachDB Cloud and the MCP server is managed, so there
-    # is nothing to stand up locally: the service reads its live credentials
-    # (DATABASE_URL, OPENROUTER_API_KEY, COCKROACH_API_KEY, COCKROACH_CLUSTER_ID)
-    # from the git-ignored .env at the repo root.
     env_file:
       - .env
     restart: unless-stopped
