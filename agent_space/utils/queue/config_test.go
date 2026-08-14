@@ -67,3 +67,54 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		t.Errorf("run timeout = %s, want 90s", cfg.RunTimeout)
 	}
 }
+
+// Switching to real SQS is two edits, and the second one is a deletion. Forget
+// it and the override silently wins, so every call goes to a LocalStack that
+// may not even be running — a failure that reads as a broken queue rather than
+// a stale .env.
+func TestRealQueueURLIgnoresAStaleLocalStackEndpoint(t *testing.T) {
+	t.Setenv("SQS_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/000000000000/static-log-analysis")
+	t.Setenv("AWS_ENDPOINT_URL", "http://localhost:4566")
+
+	if endpoint := ConfigFromEnv().Endpoint; endpoint != "" {
+		t.Errorf("endpoint = %q, want it dropped for an AWS queue URL", endpoint)
+	}
+}
+
+func TestLocalStackEndpointIsKeptForALocalQueue(t *testing.T) {
+	t.Setenv("SQS_QUEUE_URL", "http://localhost:4566/000000000000/static-log-analysis")
+	t.Setenv("AWS_ENDPOINT_URL", "http://localhost:4566")
+
+	// the whole local stack depends on this override surviving
+	if endpoint := ConfigFromEnv().Endpoint; endpoint != "http://localhost:4566" {
+		t.Errorf("endpoint = %q, want the override kept for a local queue", endpoint)
+	}
+}
+
+func TestIsAWSQueue(t *testing.T) {
+	cases := []struct {
+		queueURL string
+		want     bool
+	}{
+		{"https://sqs.us-east-1.amazonaws.com/123456789012/q", true},
+		{"https://sqs-fips.us-east-1.amazonaws.com/123456789012/q", true},
+		// China's hosts do not end .amazonaws.com, so they need matching separately
+		{"https://sqs.cn-north-1.amazonaws.com.cn/123456789012/q", true},
+		{"HTTPS://SQS.US-EAST-1.AMAZONAWS.COM/123456789012/q", true},
+
+		{"http://localhost:4566/000000000000/q", false},
+		{"http://localstack:4566/000000000000/q", false},
+		// a host that merely contains the string is not AWS, and treating it as
+		// one would drop a deliberate endpoint override
+		{"https://evil-amazonaws.com/123456789012/q", false},
+		{"https://amazonaws.com.attacker.net/123456789012/q", false},
+		{"", false},
+		{"://nonsense", false},
+	}
+
+	for _, tc := range cases {
+		if got := isAWSQueue(tc.queueURL); got != tc.want {
+			t.Errorf("isAWSQueue(%q) = %v, want %v", tc.queueURL, got, tc.want)
+		}
+	}
+}
