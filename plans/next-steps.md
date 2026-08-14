@@ -1,10 +1,16 @@
 # SRE agent — state and next steps
 
-Scratch handoff doc. Written 2026-08-10, rewritten 2026-08-14 after the
-decision-learning session. Hackathon deadline is **2026-08-18**, so **4 days**.
+**The handoff doc.** There is deliberately only one. Written 2026-08-10,
+rewritten 2026-08-14 after the decision-learning session, when the root `NEXT.md`
+was merged into it and deleted — its App Runner research and cost method survive
+under [Deploy and demo](#deploy-and-demo), which is the only part of it that was
+still true.
 
-Read this first if you are picking the project up cold. `NEXT.md` at the repo
-root is from 2026-08-07 and is superseded by this file.
+Hackathon deadline is **2026-08-18**, so **4 days**.
+
+The two files under `plans/` other than this one, and
+`agent_space/plans/dazzling-giggling-squid.md`, are *records of reasoning* for
+work that is now done. They are not to-do lists and nothing in them is pending.
 
 ---
 
@@ -289,12 +295,19 @@ logged rather than quietly sending every poll to LocalStack.
 What has never happened: a real queue created, real credentials set, one
 assignment delivered end to end. Do it before the demo, not during.
 
-### 4. Run `demo.sh` end to end
+### 4. Pick the deploy target
 
-Still the thing you will lean on while recording, and steps 3-4 have never been
-run in one pass.
+Still undecided, and it is a **design input** rather than a detail — see
+[Deploy and demo](#deploy-and-demo). Decide before building anything for it.
 
-### 5. `GIN_MODE=release` and an OpenRouter spend cap
+### 5. Run `demo.sh` end to end, against a seeded cluster
+
+Still the thing you will lean on while recording, and steps 3-4 of the script
+have never been run in one pass. **Run `scripts/seed-cluster.sql` first** — see
+the seeding trap below, which is the single most expensive thing on this page to
+get wrong.
+
+### 6. `GIN_MODE=release` and an OpenRouter spend cap
 
 Neither is code. The server is in debug mode, logging every route and request.
 The spend cap is the only control that still works when the code is wrong.
@@ -316,6 +329,151 @@ The spend cap is the only control that still works when the code is wrong.
   column makes it a loop over rows. Write it when it is needed.
 - **Concurrency is still unverified.** Two simultaneous `/agent` calls have never
   been tested.
+
+---
+
+## Deploy and demo
+
+Merged from the old `NEXT.md` (2026-08-07) and re-checked on 2026-08-14. Numbers
+marked [measured] were read off real output; [unverified] means believed but not
+tested — treat those with suspicion.
+
+### The seeding trap — do not skip this
+
+The most expensive thing on this page. Before `scripts/seed-cluster.sql` existed,
+the agent's live-cluster half was **doing nothing**. Against a cluster holding
+only the langchain vector tables, it invented a `prod_db` database with
+`checkouts` and `cart_items`, and six of its eight tool calls errored:
+
+```
+list_tables      {"database":"prod_db"}   → target database or schema does not exist
+get_table_schema {"table":"checkouts"}    → relation ... does not exist
+```
+
+It still answered **ROLLBACK, the right commit, citing the right past incident**.
+That is the trap: the answer came entirely from the vector store, the live-cluster
+integration contributed zero, and nothing in the output said so. A judge reading
+that trace sees a system that looks grounded and isn't.
+
+After seeding, five calls, zero failures, and the commit is *derived from the
+cluster* and corroborated against past incidents — which is the actual pitch.
+
+**Run the seed script against whatever cluster the demo points at, including the
+cloud one, before recording anything.**
+
+### App Runner would kill the synchronous `/agent` [verified]
+
+App Runner's per-request timeout is **120 seconds and is not configurable**
+(roadmap issue below still open; some users report being cut off at 30s).
+
+**Much less severe than when this was first written**, because the SQS worker now
+carries the long work: an assignment is consumed, investigated and remediated
+entirely outside any HTTP request. The pipeline is immune to the cap.
+
+What is *not* immune is `POST /agent`, the synchronous demo route, which calls
+`SREAgent.Run(c.Request.Context(), ...)`. Two consequences, both live today:
+
+- The first complete run took **~4 minutes** to investigate. That breaches 120s
+  outright, so on App Runner the manual route would 504 while the queue path
+  beside it worked fine.
+- **A client disconnect cancels the run server-side** and returns 500, because it
+  is the request's context. Cost me three confusing failures with `curl -m 300`
+  before I realised it was me, not the server. A judge closing a tab does the same.
+
+So: if the demo drives everything through `enqueue.sh` and reads results back
+with `GET /agent/:id`, App Runner is fine. If it drives `POST /agent` live on
+stage, pick something without a hard request cap (ECS behind an ALB with a long
+idle timeout, or a plain EC2 box) — or make `POST /agent` enqueue-and-poll like
+the queue path already does, which is ~80 lines and removes the disconnect
+problem too.
+
+### AWS access is unproven
+
+- No `aws` CLI on this machine.
+- IAM user `jude` (account 071954287023) has almost no attached policies — S3 and
+  Lambda both returned plain `AccessDenied`.
+- `scripts/deploy.sh` is 160 lines and **has never been executed once**.
+- **Bedrock is dead on this account.** Known dead end, do not re-diagnose.
+
+Three unknowns stacked, and first-run debugging of a deploy script is exactly
+where a day disappears with four left.
+
+### Cost per `/agent` run [estimated]
+
+Method: ~4 chars/token, anchored on one measurement — a bare tool-calling request
+with 15 tool schemas came back at **3182 prompt tokens** [measured], so the schema
+block dominates the fixed cost.
+
+| Component | Tokens |
+|---|---|
+| System prompt + 10 tool schemas | ~2400 |
+| Grounding: 4 recalled incidents | ~200 |
+| Tool results accumulated by iteration 3 | ~1400 |
+| **Prompt tokens, summed over 3 iterations + summarise** | **~14,700** |
+| Completion tokens | ~1000 |
+
+No dollar figures on purpose — multiply by whatever the model actually costs.
+For scale, ~30 full remediation runs was priced between $0.15 (qwen3.7-flash) and
+$10.20 (Sonnet-class) when this was last checked, which is why cost is not the
+binding constraint on model choice; the format bug was.
+
+**Prompt caching** is the unexplored win: the static prefix is re-sent on every
+iteration plus the final summarise, so ~7000 redundant prompt tokens per run
+[estimated] are recoverable if OpenRouter exposes caching for the chosen model.
+
+### Latency, and the good story in it [measured]
+
+`/agent` went 370.4s → 66.0s on a local model when one bad tool call was removed
+from the prompt (`SHOW JOBS` migration history, 65% of all tool output, re-sent
+every iteration). The breakdown is the number worth quoting:
+
+```
+MCP tool calls      0.06s    0.04%   5 calls, 0 failed
+model + overhead   65.90s   99.96%   5 iterations
+```
+
+**CockroachDB is not the bottleneck by three orders of magnitude** — a good line
+for the submission, and reproducible with `./scripts/bench.sh`.
+
+Caveat: run-to-run variance is high (370s, 135s, 66s across three runs, the last
+two on identical code). Do not quote 66s as reliable without
+`./scripts/bench.sh -e agent -n 5`.
+
+### Tuning knobs, none urgent
+
+- **`maxToolOutputChars` is 4000** (`agent/runner.go:33`). Dropping to ~1500 cuts
+  the worst case but truncates legitimately large `SELECT` results. Fix tool
+  *choice* before tool *output*.
+- **`defaultMaxIterations` is 6** (`agent/runner.go:26`). Real runs used 3, so 4
+  would cap the tail without changing any observed run.
+- **`maxResultChars` is 6000** (`utils/mcp/tool.go:16`) and never binds, because
+  the runner's 4000 truncates first. Not a bug, but someone will eventually tune
+  the wrong one.
+- **`/store` and `/ask` use `context.Background()`**, so they ignore cancellation
+  entirely — the opposite failure to `/agent`, which is too sensitive to it. Both
+  should use the request context with an explicit timeout.
+
+---
+
+## Decisions only you can make
+
+- **Deploy target.** Per above, this is a design input, not a detail.
+- **Synthetic incident rows in the live cloud cluster.** INC-412 and INC-388 are
+  still sitting in the production cluster from early testing. Keep them as demo
+  seed data, or clear them out? Harmless, but they are fake data in a real
+  database.
+- **The LICENSE name.** Deferred previously; still says what it says.
+- **Whether to rebase out the `Co-Authored-By` trailers** on the six commits that
+  carry them.
+
+---
+
+## Small stuff
+
+- `agent_space/MCP_HANDOFF.md` is committed and partly stale — it contradicts the
+  code in places. Update it or drop it.
+- `scripts/test_api.sh` predates everything and still tests "Agent Antigravity".
+  Harmless, but it is the first script a judge might open.
 
 ---
 
@@ -463,3 +621,12 @@ Killing a dev server: `pkill -f "go run ."` kills the parent, not the compiled
 child, and has killed this shell more than once. Take the PID from
 `ss -ltnp | grep 8080` instead. A stale server holding `:8080` means the new one
 exits with "address already in use" and your test silently hits the *old* build.
+
+---
+
+## Sources for the things that were looked up rather than recalled
+
+- [Configurable request timeout · aws/apprunner-roadmap#104](https://github.com/aws/apprunner-roadmap/issues/104)
+- [AWS App Runner: what exactly does the timeout limit mean? (re:Post)](https://repost.aws/questions/QUnozEpub5Tnq-ilmrB4l2Sg/aws-app-runner-what-exactly-does-the-timeout-limit-documentation-mean)
+- [Text Embedding Models — OpenRouter](https://openrouter.ai/collections/embedding-models)
+- [Embeddings — OpenRouter docs](https://openrouter.ai/docs/client-sdks/typescript/api-reference/embeddings)

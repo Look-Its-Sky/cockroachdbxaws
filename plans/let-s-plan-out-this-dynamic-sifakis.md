@@ -186,9 +186,10 @@ for ctx not cancelled:
 
 Points that matter:
 
-- **`runCtx` is derived from the worker's context, never a request context.** The bug in
-  NEXT.md §2 — `/agent` cancelling because a client disconnected — must not be reproduced
-  here. Give it its own timeout (`WORKER_RUN_TIMEOUT`, default 10m).
+- **`runCtx` is derived from the worker's context, never a request context.** The bug
+  described in `next-steps.md` under "Deploy and demo" — `/agent` cancelling because a
+  client disconnected — must not be reproduced here. Give it its own timeout
+  (`WORKER_RUN_TIMEOUT`, default 10m).
 - **The heartbeat is what makes a 66s run safe.** Without it, a 30s queue visibility
   timeout redelivers mid-run and the same investigation runs three times on a billable key
   — which is exactly what `ApproximateReceiveCount: "3"` in the sample message shows.
