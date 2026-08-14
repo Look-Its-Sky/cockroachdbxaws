@@ -66,6 +66,16 @@ Deployed on **AWS App Runner** from an image in **Amazon ECR**.
 | `POST /ask` | `{"question": "…", "limit": 4}` — one-shot retrieve→generate. No tools. |
 | `GET /tools` | The MCP tools discovered at boot, with their JSON Schemas. Proof the MCP handshake is live. |
 | `POST /agent` | `{"question": "…", "limit": 4}` — the full loop: recall, query the cluster, decide. Returns the answer **and the trace of every tool call**. |
+| `GET /agent/:id` | Read back an investigation the SQS worker ran: verdict plus full trace. |
+| `GET /repositories` | The service → repository mapping, and whether each service can be tested or only compiled. |
+| `GET /remediations` | Recent remediation runs, newest first. No candidates — a diff per candidate turns a list into megabytes. |
+| `GET /agent/:id/remediation` | Triage, the ranked candidate fixes, and the engineer's decision if one was recorded. |
+| `POST /agent/:id/remediation` | Propose fixes for an investigation that already has a verdict. `202`; poll the `GET`. |
+| `POST /solutions/:candidate/pr` | Open a draft pull request from one candidate. The only thing that touches the repository. |
+| `POST /agent/:id/decision` | Record which fix an engineer took and why the rest were not, and put it where the next similar incident will find it. |
+
+The remediation half has request and response shapes, status codes and the rules a UI has to
+honour written up for the frontend in **[`agent_space/docs/frontend-api.md`](agent_space/docs/frontend-api.md)**.
 
 **`COCKROACH_API_KEY` is required to start.** MCP is one of the two CockroachDB integrations this
 service exists to demonstrate, so booting without it would serve an API that answers `/ping`
