@@ -39,6 +39,11 @@ var (
 
 const schemaLoadTimeout = 60 * time.Second
 
+// how far past a run's own ceiling a "running" row has to be before it is
+// treated as abandoned. Slack so that a run finishing exactly at its deadline
+// is not reclaimed out from under itself.
+const staleSlack = 5 * time.Minute
+
 func initStore() {
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
@@ -202,6 +207,7 @@ func initWorker() {
 	} else {
 		sqsResults = worker.NewDurableStore(journal)
 		log.Println("Worker: verdicts persist to the investigations table and survive a restart.")
+		reclaimInvestigations(journal, cfg.RunTimeout)
 	}
 
 	sqsWorker = &worker.Worker{
@@ -259,6 +265,7 @@ func initRemediation() {
 		log.Printf("Remediation: candidates will not be stored, so the UI cannot read them back: %v", err)
 	} else {
 		solutions = s
+		reclaimRemediations(s)
 	}
 
 	publisher = remediation.NewPublisher(os.Getenv("GITHUB_TOKEN"))
@@ -281,6 +288,45 @@ func initRemediation() {
 		// not positive as "use the default". Read separately so the off switch
 		// exists at all.
 		MaxRepairs: repairRounds(),
+	}
+}
+
+// mark investigations that a previous process left running.
+//
+// Age-gated on the run's own ceiling, so this stays correct with a second
+// process polling the same queue: past that, a run cannot still be in flight.
+// Recovering the work is Store.Seen's job — SQS redelivers it, and a sweep here
+// would only race that. This exists so nothing reports a dead run as live.
+func reclaimInvestigations(journal *worker.PGJournal, runTimeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), schemaLoadTimeout)
+	defer cancel()
+
+	n, err := journal.AbandonStale(ctx, runTimeout+staleSlack)
+	if err != nil {
+		log.Printf("Worker: could not reconcile investigations left running: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("Worker: %d investigation(s) were left running by a previous process, and are now failed.", n)
+	}
+}
+
+// mark remediations that a previous process left running.
+//
+// Unconditional, because nothing outside this process could have been running
+// one, and because there is no redelivery to recover a remediation: without
+// this it reports "running" to the UI forever.
+func reclaimRemediations(s *remediation.Solutions) {
+	ctx, cancel := context.WithTimeout(context.Background(), schemaLoadTimeout)
+	defer cancel()
+
+	n, err := s.AbandonStale(ctx)
+	if err != nil {
+		log.Printf("Remediation: could not reconcile runs left running: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("Remediation: %d run(s) were left running by a previous process, and are now failed.", n)
 	}
 }
 

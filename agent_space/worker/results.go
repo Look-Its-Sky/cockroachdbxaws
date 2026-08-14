@@ -185,27 +185,58 @@ func (s *Store) Fail(a queue.Assignment, reason string) {
 // the record for an investigation, falling back to the journal for one this
 // process never ran or has since evicted
 func (s *Store) Get(investigationID string) (Record, bool) {
+	rec, found, _ := s.get(investigationID)
+	return rec, found
+}
+
+// get, plus whether this process is the one holding the record.
+//
+// A record in the map is one this process started or finished itself. One that
+// came back from the journal alone may belong to a process that has since
+// exited, which is a distinction Seen depends on.
+func (s *Store) get(investigationID string) (rec Record, found, live bool) {
 	s.mu.RLock()
-	rec, ok := s.byID[investigationID]
+	held, ok := s.byID[investigationID]
 	if ok {
-		defer s.mu.RUnlock()
-		return *rec, true
+		rec = *held
+		s.mu.RUnlock()
+		return rec, true, true
 	}
 	s.mu.RUnlock()
 
-	return s.recall(investigationID)
+	rec, found = s.recall(investigationID)
+	return rec, found, false
 }
 
 // whether this investigation has already been paid for, so a redelivery is not
-// investigated twice. A retrying record does not count — it exists precisely
-// because the work still has to happen.
+// investigated twice.
 //
-// With a journal this holds across restarts, and across two processes polling
-// the same queue. Without one it is per-process, and a message redelivered
-// after a restart is investigated again.
+// Two kinds of record do not count, both because the work still has to happen:
+// a retrying one, which exists precisely to say so, and a running one this
+// process is not holding. The second is the crash case — the process that
+// started it exited without ever writing a verdict, so nothing is going to
+// finish it, and the redelivery in hand is the retry SQS owes us. Calling that
+// "seen" acknowledges the message and loses the incident.
+//
+// The cost is that two processes polling one queue can both investigate the
+// same incident if the first one's visibility heartbeat fails. That is rare and
+// already logged, it wastes a run rather than corrupting anything, and it is
+// much the better trade: dropping work silently is the one thing this must not
+// do.
+//
+// With a journal this holds across restarts. Without one it is per-process, and
+// a message redelivered after a restart is investigated again.
 func (s *Store) Seen(investigationID string) bool {
-	rec, ok := s.Get(investigationID)
-	return ok && rec.Status != StatusRetrying
+	rec, found, live := s.get(investigationID)
+	switch {
+	case !found:
+		return false
+	case rec.Status == StatusRetrying:
+		return false
+	case rec.Status == StatusRunning && !live:
+		return false
+	}
+	return true
 }
 
 func (s *Store) put(rec *Record) {

@@ -90,6 +90,37 @@ func (j *PGJournal) Save(ctx context.Context, rec Record) error {
 	return nil
 }
 
+// what a run left at "running" by a dead process is recorded as.
+const abandonedReason = "abandoned: the process running this investigation exited before it finished"
+
+// AbandonStale marks investigations that outlived any possible run as failed.
+//
+// A row stays at "running" when the process holding it exits, because the only
+// code that would overwrite it died with that process. olderThan should be the
+// longest a run could legitimately take, so anything past it cannot still be in
+// flight — which is what makes this safe to run while a second process is
+// polling the same queue.
+//
+// Recovery is not this function's job: Seen lets the SQS redelivery
+// re-investigate, and a sweep at boot would only race it. This exists so
+// nothing reports a dead run as live.
+func (j *PGJournal) AbandonStale(ctx context.Context, olderThan time.Duration) (int64, error) {
+	const q = `
+		UPDATE ` + journalTable + `
+		SET status = $1, error = coalesce(nullif(error, ''), $2),
+		    finished_at = now(), updated_at = now()
+		WHERE status = $3 AND started_at < $4`
+
+	tag, err := j.Pool.Exec(ctx, q,
+		string(StatusFailed), abandonedReason, string(StatusRunning),
+		time.Now().UTC().Add(-olderThan),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("worker: abandon stale investigations: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (j *PGJournal) Load(ctx context.Context, investigationID string) (Record, bool, error) {
 	const q = `
 		SELECT investigation_id, incident_id, coalesce(correlation_id, ''),

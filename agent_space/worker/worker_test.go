@@ -379,6 +379,42 @@ func TestRunSurvivesReceiveErrors(t *testing.T) {
 	}
 }
 
+// The recovery path end to end. A process crashes mid-investigation, leaving
+// its row at "running"; the visibility lease lapses and SQS redelivers, which
+// is exactly what main.go's shutdown comment promises. The worker has to take
+// that delivery — reading the orphaned row as "already investigated"
+// acknowledges the message and loses the incident for good.
+func TestCrashedInvestigationIsReinvestigatedOnRedelivery(t *testing.T) {
+	j := newFakeJournal()
+
+	// the process that started it and never came back
+	crashed := NewDurableStore(j)
+	crashed.Start(queue.Assignment{
+		InvestigationID: sampleInvestigation,
+		IncidentID:      "6424cd115aa6f4be24f943bd4c10e776dbf4459c267fda69520dcd548831b5ed",
+		ServiceID:       "payment",
+	})
+
+	q := &fakeQueue{}
+	a := &fakeAgent{result: agent.Result{Answer: "ROLLBACK 7e91d04"}}
+	w := newWorker(q, fakeResolver{ctx: resolvedContext()}, a)
+	// a fresh process: empty map, same journal
+	w.Results = NewDurableStore(j)
+
+	// a second delivery, which is what a lapsed lease produces
+	w.handle(context.Background(), message(sampleBody, 2))
+
+	if a.callCount() != 1 {
+		t.Errorf("agent ran %d times, want 1: the redelivery was dropped and the incident lost", a.callCount())
+	}
+	if q.deletedCount() != 1 {
+		t.Errorf("message deleted %d times, want 1", q.deletedCount())
+	}
+	if rec, ok := w.Results.Get(sampleInvestigation); !ok || rec.Status != StatusDone {
+		t.Errorf("record after the retry: ok=%v status=%q, want %q", ok, rec.Status, StatusDone)
+	}
+}
+
 func TestStoreEviction(t *testing.T) {
 	s := NewStore()
 	s.capacity = 2

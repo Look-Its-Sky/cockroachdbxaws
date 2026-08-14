@@ -125,3 +125,99 @@ func TestLiveJournalRoundTrip(t *testing.T) {
 		t.Error("Seen() is true for an unknown investigation")
 	}
 }
+
+// The age gate is the whole reason AbandonStale is safe to run while another
+// process is polling the same queue, so it is the part worth proving against a
+// real database rather than a fake.
+//
+//	JOURNAL_LIVE_TEST=1 go test ./worker/ -run Live -v
+func TestLiveAbandonStaleOnlyReclaimsOldRuns(t *testing.T) {
+	if os.Getenv("JOURNAL_LIVE_TEST") == "" {
+		t.Skip("set JOURNAL_LIVE_TEST=1 to run against DATABASE_URL")
+	}
+
+	utils.LoadConfig()
+	connStr := os.Getenv("DATABASE_URL")
+	if connStr == "" {
+		t.Skip("DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	journal, err := NewPGJournal(ctx, pool)
+	if err != nil {
+		t.Fatalf("NewPGJournal: %v", err)
+	}
+
+	const (
+		stale = "test-live-abandon-stale"
+		fresh = "test-live-abandon-fresh"
+	)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(cleanupCtx,
+			`DELETE FROM investigations WHERE investigation_id = ANY($1)`,
+			[]string{stale, fresh}); err != nil {
+			t.Logf("cleanup: %v", err)
+		}
+	})
+
+	now := time.Now().UTC()
+	// one run that started well past any possible ceiling, and one that has
+	// barely begun and could genuinely still be in flight somewhere
+	for id, startedAt := range map[string]time.Time{
+		stale: now.Add(-2 * time.Hour),
+		fresh: now,
+	} {
+		if err := journal.Save(ctx, Record{
+			InvestigationID: id,
+			IncidentID:      "test-incident",
+			ServiceID:       "checkout",
+			Status:          StatusRunning,
+			StartedAt:       startedAt,
+		}); err != nil {
+			t.Fatalf("Save(%s): %v", id, err)
+		}
+	}
+
+	n, err := journal.AbandonStale(ctx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("AbandonStale: %v", err)
+	}
+	// other rows from real runs may legitimately be reclaimed too, so this is a
+	// floor rather than an equality
+	if n < 1 {
+		t.Errorf("AbandonStale reclaimed %d rows, want at least the stale one", n)
+	}
+
+	got, ok, err := journal.Load(ctx, stale)
+	if err != nil || !ok {
+		t.Fatalf("Load(stale): ok=%v err=%v", ok, err)
+	}
+	if got.Status != StatusFailed {
+		t.Errorf("stale run status = %q, want %q", got.Status, StatusFailed)
+	}
+	if got.Error == "" {
+		t.Error("a reclaimed run should say why it was abandoned")
+	}
+	if got.FinishedAt == nil {
+		t.Error("a reclaimed run should have a finished_at")
+	}
+
+	// the one that could still be running must be left exactly alone
+	got, ok, err = journal.Load(ctx, fresh)
+	if err != nil || !ok {
+		t.Fatalf("Load(fresh): ok=%v err=%v", ok, err)
+	}
+	if got.Status != StatusRunning {
+		t.Errorf("fresh run status = %q, want it untouched at %q", got.Status, StatusRunning)
+	}
+}

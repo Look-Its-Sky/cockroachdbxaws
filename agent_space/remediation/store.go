@@ -198,6 +198,38 @@ func (s *Solutions) Supersede(ctx context.Context, investigationID string) error
 	return nil
 }
 
+// what a run left at "running" by a dead process is recorded as.
+const abandonedReason = "abandoned: the process running this remediation exited before it finished"
+
+// AbandonStale marks every running remediation as failed.
+//
+// Unconditional, unlike the worker's equivalent, because nothing outside this
+// process can be working on one: the pool is per-process (inFlight is an
+// in-memory map) and the SQS message was acknowledged long before the handoff,
+// so there is no redelivery to collide with. A row still at "running" when a
+// process boots has no owner by construction.
+//
+// That also makes it the only mechanism here. An investigation left behind gets
+// re-run by SQS; a remediation left behind is simply gone, and would otherwise
+// report "running" to the UI forever.
+//
+// Candidates need no equivalent: Run only saves them at finish, so a remediation
+// that died mid-fan-out has none.
+func (s *Solutions) AbandonStale(ctx context.Context) (int64, error) {
+	const q = `
+		UPDATE ` + remediationTable + `
+		SET status = $1, error = coalesce(nullif(error, ''), $2),
+		    finished_at = now(), updated_at = now()
+		WHERE status = $3`
+
+	tag, err := s.Pool.Exec(ctx, q,
+		string(RemediationFailed), abandonedReason, string(RemediationRunning))
+	if err != nil {
+		return 0, fmt.Errorf("remediation: abandon stale runs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // Load returns a remediation and its candidates, best first.
 func (s *Solutions) Load(ctx context.Context, investigationID string) (Outcome, bool, error) {
 	const q = `

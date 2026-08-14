@@ -135,6 +135,31 @@ func TestRetryingRecordIsNotTreatedAsSeenAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRunningRecordFromTheJournalIsNotSeen(t *testing.T) {
+	j := newFakeJournal()
+
+	// a process that started an investigation and exited without finishing it
+	before := NewDurableStore(j)
+	before.Start(queue.Assignment{InvestigationID: "v1", IncidentID: "i1"})
+
+	// a fresh process reads that row back and must not mistake it for a verdict:
+	// nothing is going to finish it, so the redelivery has to be taken
+	after := NewDurableStore(j)
+	if after.Seen("v1") {
+		t.Error("an orphaned running record suppressed the redelivery, losing the incident")
+	}
+}
+
+func TestRunningRecordInThisProcessIsSeen(t *testing.T) {
+	s := NewDurableStore(newFakeJournal())
+	s.Start(queue.Assignment{InvestigationID: "v1", IncidentID: "i1"})
+
+	// this process is holding it, so a duplicate delivery is still refused
+	if !s.Seen("v1") {
+		t.Error("Seen() is false for an investigation this process is running")
+	}
+}
+
 func TestBrokenJournalDoesNotBreakARun(t *testing.T) {
 	j := newFakeJournal()
 	j.saveErr = errors.New("connection refused")
