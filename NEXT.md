@@ -1,5 +1,13 @@
 # What's left
 
+> **Superseded — read [`plans/next-steps.md`](plans/next-steps.md) instead.**
+>
+> This file is from 2026-08-07 and most of it is now wrong: the work is pushed, auth landed,
+> embeddings moved to OpenRouter, Cloud MCP works, and the whole remediation half described
+> nowhere below exists and has opened a real draft pull request. Kept for the App Runner
+> timeout research and the token-cost method, which are still sound. Everything else here
+> should be checked against the code before it is believed.
+
 Written 2026-08-07, updated the same day after a working session. Deadline 2026-08-18, so
 **11 days**.
 
