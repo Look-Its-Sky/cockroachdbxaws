@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tmc/langchaingo/llms"
 )
 
 func TestParseProposalReadsSummaryRationaleAndFiles(t *testing.T) {
@@ -272,5 +274,45 @@ func TestProposalPromptOmitsPrecedentSectionWhenThereIsNone(t *testing.T) {
 
 	if strings.Contains(prompt, "How this team has judged") {
 		t.Errorf("the precedent section appears with no precedents:\n%s", prompt)
+	}
+}
+
+// The failure that presented as "the model has nothing to say" and was really
+// "the budget was too small to say it". Reasoning tokens are billed against the
+// completion budget, so a model that thinks at length returns an empty message
+// with a length stop — no error, nothing to parse.
+func TestEmptyModelMessageNamesTheReasoningBudget(t *testing.T) {
+	_, err := choiceContent(&llms.ContentResponse{
+		Choices: []*llms.ContentChoice{{Content: "  \n ", StopReason: "length"}},
+	}, "repair (minimal)")
+
+	if err == nil {
+		t.Fatal("an empty message was accepted as a usable response")
+	}
+	for _, want := range []string{"repair (minimal)", "length", "budget"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+func TestNoChoicesReadsDifferentlyFromAnEmptyMessage(t *testing.T) {
+	_, err := choiceContent(&llms.ContentResponse{}, "propose (minimal)")
+	if err == nil {
+		t.Fatal("a response with no choices was accepted")
+	}
+	// a provider that returned nothing at all is not a budget problem, and
+	// saying so would send someone tuning the wrong dial
+	if strings.Contains(err.Error(), "budget") {
+		t.Errorf("no-choices error blames the budget: %v", err)
+	}
+}
+
+func TestContentIsReturnedUnchangedWhenPresent(t *testing.T) {
+	got, err := choiceContent(&llms.ContentResponse{
+		Choices: []*llms.ContentChoice{{Content: "SUMMARY: fixed it", StopReason: "stop"}},
+	}, "propose (minimal)")
+	if err != nil || got != "SUMMARY: fixed it" {
+		t.Errorf("got %q, err %v", got, err)
 	}
 }

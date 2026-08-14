@@ -268,15 +268,44 @@ func Propose(ctx context.Context, model llms.Model, in ProposalInput, s Strategy
 	if err != nil {
 		return Proposal{}, fmt.Errorf("remediation: propose (%s): %w", s.Name, err)
 	}
-	if len(resp.Choices) == 0 {
-		return Proposal{}, fmt.Errorf("remediation: propose (%s): model returned no choices", s.Name)
+	content, err := choiceContent(resp, "propose ("+s.Name+")")
+	if err != nil {
+		return Proposal{}, err
 	}
-
-	return ParseProposal(resp.Choices[0].Content)
+	return ParseProposal(content)
 }
 
-// whole files come back out, so this has to be far larger than the verdict's
-const proposalBudget = 16000
+// the model's text, or an error saying why there is none.
+//
+// An empty message with a "length" stop is the reasoning-budget failure, and it
+// is worth naming in those words: it presents as the model having nothing to
+// say, which reads as a bad model rather than as a budget that was too small.
+// That misreading cost two full pipeline runs and a model swap to unpick.
+func choiceContent(resp *llms.ContentResponse, what string) (string, error) {
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("remediation: %s: model returned no choices", what)
+	}
+
+	choice := resp.Choices[0]
+	if strings.TrimSpace(choice.Content) != "" {
+		return choice.Content, nil
+	}
+
+	return "", fmt.Errorf("remediation: %s: the model returned an empty message (stop reason: %s). "+
+		"Reasoning counts against the %d-token completion budget, so a model that thinks at length "+
+		"can exhaust it before writing anything; raise proposalBudget or use a model that reasons less",
+		what, fallback(choice.StopReason, "unknown"), proposalBudget)
+}
+
+// Whole files come back out, so this has to be far larger than the verdict's.
+//
+// It also has to absorb reasoning. Providers count a model's internal thinking
+// against this same budget, so a reasoning model given too little spends all of
+// it deliberating and returns an empty message — no error, no content, nothing
+// to parse. Measured on qwen3.7-flash: ~3,000 reasoning tokens for a trivial
+// one-function fix, before a single character of the answer. A real repair
+// carries whole files and a compiler log, and reasons proportionally.
+const proposalBudget = 32000
 
 func buildProposalPrompt(in ProposalInput) string {
 	var b strings.Builder
@@ -415,11 +444,11 @@ func Repair(ctx context.Context, model llms.Model, in ProposalInput, previous Pr
 	if err != nil {
 		return Proposal{}, fmt.Errorf("remediation: repair (%s): %w", s.Name, err)
 	}
-	if len(resp.Choices) == 0 {
-		return Proposal{}, fmt.Errorf("remediation: repair (%s): model returned no choices", s.Name)
+	content, err := choiceContent(resp, "repair ("+s.Name+")")
+	if err != nil {
+		return Proposal{}, err
 	}
-
-	return ParseProposal(resp.Choices[0].Content)
+	return ParseProposal(content)
 }
 
 // how much of a failure to quote back. A Go compiler error is three lines; a
