@@ -224,13 +224,14 @@ type ProposalInput struct {
 	Precedents []string
 }
 
-const proposalPrompt = `You are fixing a production fault in a service that is currently in incident.
-
-You are given the incident, what an investigation concluded, a triage note saying
-the fault is present, the layout of the service, and the current contents of the
-files the fault is believed to live in.
-
-Reply with a one-line summary, a short rationale, and then the complete new
+// The output contract. Shared by the first attempt and by every repair, and
+// stated in full both times.
+//
+// It has to be repeated because these calls carry no history. A repair told to
+// "reply in the same format as before" is being referred to a conversation it
+// was never part of: it answers in markdown, ParseProposal finds no markers,
+// and a correct fix is thrown away as though the model had said nothing.
+const outputFormat = `Reply with a one-line summary, a short rationale, and then the complete new
 contents of every file you are changing, in exactly this format:
 
 SUMMARY: one line, what you changed
@@ -245,7 +246,17 @@ Rules that matter:
   the file entirely, so anything you leave out is deleted.
 - Do NOT wrap the contents in markdown fences and do NOT add commentary inside a
   file block. The block is written to disk verbatim.
-- Paths are relative to the repository root, exactly as they were shown to you.
+- Do NOT use markdown headings for the summary or rationale. The literal words
+  SUMMARY: and RATIONALE: are what is parsed.
+- Paths are relative to the repository root, exactly as they were shown to you.`
+
+const proposalPrompt = `You are fixing a production fault in a service that is currently in incident.
+
+You are given the incident, what an investigation concluded, a triage note saying
+the fault is present, the layout of the service, and the current contents of the
+files the fault is believed to live in.
+
+` + outputFormat + `
 - Change as little as the strategy allows. You are being reviewed by a person
   under time pressure.
 - If the evidence does not support any change, reply with SUMMARY: no change and
@@ -365,19 +376,14 @@ type Failure struct {
 const repairPrompt = `Your previous attempt at this fix did not work. You are being shown exactly
 what the toolchain said, and the current contents of the files as you left them.
 
-Correct the problem and reply in the same format as before: a summary, a
-rationale, and the complete new contents of every file you are changing.
-
-Rules that matter:
+` + outputFormat + `
 - The output below is ground truth. It is not a suggestion and it is not a
   matter of opinion — the code did not compile, or the tests did not pass.
 - Fix the reported problem without abandoning the fix. Reverting to the original
   code makes the build pass and leaves the fault in production, which is worse
   than failing.
 - Change as little as the error requires. A type conversion is a type
-  conversion; do not rewrite the function around it.
-- Write the WHOLE file, from its first line to its last, exactly as before.
-  Anything you leave out is deleted.`
+  conversion; do not rewrite the function around it.`
 
 // Repair shows a candidate its own failure and asks again.
 //

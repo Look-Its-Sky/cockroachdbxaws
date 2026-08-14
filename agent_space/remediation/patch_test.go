@@ -316,3 +316,37 @@ func TestContentIsReturnedUnchangedWhenPresent(t *testing.T) {
 		t.Errorf("got %q, err %v", got, err)
 	}
 }
+
+// Both prompts must carry the output contract in full. The calls are stateless,
+// so "the same format as before" refers to nothing: a repair without the markers
+// answers in markdown, and a correct fix is discarded as though the model had
+// said nothing at all. That silently disabled the whole repair round.
+func TestBothPromptsStateTheOutputFormat(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"proposal": proposalPrompt,
+		"repair":   repairPrompt,
+	} {
+		for _, want := range []string{"SUMMARY:", "RATIONALE:", fileBegin, fileEnd, "markdown fences"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("the %s prompt does not state %q, so its output cannot be parsed", name, want)
+			}
+		}
+	}
+}
+
+// The exact shape the model produced when it was never told the format: correct
+// fix, markdown wrapper, nothing extractable.
+func TestMarkdownFormattedAnswerYieldsNoEdits(t *testing.T) {
+	p, err := ParseProposal("### Summary\nFixed a type mismatch.\n\n" +
+		"### New Contents of `money.go`\n```go\npackage money\n```\n")
+	if err != nil {
+		t.Fatalf("ParseProposal: %v", err)
+	}
+	if len(p.Edits) != 0 {
+		t.Fatalf("markdown was parsed as %d edits; the guard is the prompt, not the parser", len(p.Edits))
+	}
+	// and the empty summary is what made this indistinguishable from silence
+	if p.Summary != "" {
+		t.Errorf("Summary = %q", p.Summary)
+	}
+}
