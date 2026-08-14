@@ -179,6 +179,11 @@ type Outcome struct {
 	Triage     *Triage     `json:"triage,omitempty"`
 	// Candidates, best first. Empty when triage stopped the run.
 	Candidates []Candidate `json:"candidates,omitempty"`
+	// Decision is what an engineer concluded, once one has. Carried here so the
+	// picker can tell an undecided run from a decided one in the single call it
+	// already makes — without it, a reload cannot show which fix was taken, and
+	// posting again silently supersedes the record.
+	Decision *Decision `json:"decision,omitempty"`
 
 	Error      string     `json:"error,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`

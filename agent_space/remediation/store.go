@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -301,6 +302,14 @@ func (s *Solutions) Load(ctx context.Context, investigationID string) (Outcome, 
 	o.Candidates, err = s.ListCandidates(ctx, investigationID)
 	if err != nil {
 		return o, true, err
+	}
+
+	// A missing decision is the ordinary case and not worth losing the run over;
+	// an unreadable one must not stop an engineer seeing the fixes themselves.
+	if decision, found, err := s.Decision(ctx, investigationID); err != nil {
+		log.Printf("remediation: could not read the decision for %s: %v", investigationID, err)
+	} else if found {
+		o.Decision = &decision
 	}
 	return o, true, nil
 }

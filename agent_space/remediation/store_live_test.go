@@ -202,6 +202,20 @@ func TestLiveDecisionRoundTrip(t *testing.T) {
 		t.Error("indexed_at is set before anything indexed it")
 	}
 
+	// the picker makes one call and has to be able to tell a decided run from an
+	// undecided one; without this a reload cannot show what was chosen, and
+	// posting again silently supersedes the record
+	reloaded, _, err := solutions.Load(ctx, inv)
+	if err != nil {
+		t.Fatalf("Load after deciding: %v", err)
+	}
+	if reloaded.Decision == nil {
+		t.Fatal("a decided remediation reads back as undecided")
+	}
+	if reloaded.Decision.ChosenCandidateID != chosenID || len(reloaded.Decision.Rejections) != 2 {
+		t.Errorf("decision did not survive the round trip: %+v", reloaded.Decision)
+	}
+
 	candidates, err := solutions.ListCandidates(ctx, inv)
 	if err != nil {
 		t.Fatalf("ListCandidates: %v", err)
