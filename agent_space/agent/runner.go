@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,11 @@ const (
 
 	// defaultSources is how many past incidents to recall, matching /ask.
 	defaultSources = 4
+
+	// how many past decisions to quote. Deliberately far fewer than incidents:
+	// these are opinions, and the more of them are in the prompt the more the
+	// live evidence has to argue against.
+	maxPrecedents = 2
 
 	// maxToolOutputChars caps what one tool result contributes to the next prompt
 	maxToolOutputChars = 4000
@@ -52,11 +58,23 @@ Two or three well-chosen queries are enough. When you have what you need, answer
 in prose. State the decision and the commit in the first sentence. Do not call a
 tool once you can answer.`
 
+// PrecedentSource recalls decisions this team made on similar incidents.
+//
+// An interface rather than the concrete type so this package does not depend on
+// the remediation half: the investigation runs perfectly well without one, and
+// nil means exactly the behaviour that existed before decisions were recorded.
+type PrecedentSource interface {
+	Recall(ctx context.Context, query string, limit int) ([]string, error)
+}
+
 type Runner struct {
 	Model         llms.Model
 	Store         vectorstores.VectorStore
 	Tools         []*mcp.Tool
 	MaxIterations int
+
+	// Precedents is what engineers decided last time. Nil disables it.
+	Precedents PrecedentSource
 
 	// tables read at boot, empty means the model discovers them itself
 	Schema string
@@ -116,10 +134,14 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 		return Result{}, err
 	}
 
-	result := Result{Sources: len(grounding), Grounding: grounding}
+	// past decisions are a bonus, never a prerequisite: an index that is missing
+	// or unreachable must not stop an incident being investigated
+	precedents := r.recallPrecedents(ctx, question)
+
+	result := Result{Sources: len(grounding), Grounding: grounding, Precedents: precedents}
 	messages := []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeSystem, r.instructions()),
-		llms.TextParts(llms.ChatMessageTypeHuman, buildPrompt(question, grounding)),
+		llms.TextParts(llms.ChatMessageTypeHuman, buildPrompt(question, grounding, precedents)),
 	}
 
 	for i := 1; i <= r.MaxIterations; i++ {
@@ -208,6 +230,24 @@ func (r *Runner) recall(ctx context.Context, question string, limit int) ([]stri
 		grounding = append(grounding, d.PageContent)
 	}
 	return grounding, nil
+}
+
+// recallPrecedents pulls what engineers decided on similar incidents.
+//
+// Errors are logged and dropped rather than returned. Past decisions improve an
+// investigation; they are not required for one, and an index that is down must
+// not cost a verdict.
+func (r *Runner) recallPrecedents(ctx context.Context, question string) []string {
+	if r.Precedents == nil {
+		return nil
+	}
+
+	found, err := r.Precedents.Recall(ctx, question, maxPrecedents)
+	if err != nil {
+		log.Printf("agent: could not recall past decisions, continuing without them: %v", err)
+		return nil
+	}
+	return found
 }
 
 // run the calls concurrently, keeping order so tool_call_ids line up; the error is the first transport failure
@@ -336,8 +376,14 @@ func assistantTurn(choice *llms.ContentChoice, calls []llms.ToolCall) llms.Messa
 	return llms.MessageContent{Role: llms.ChatMessageTypeAI, Parts: parts}
 }
 
-// buildPrompt frames the question with the recalled incidents.
-func buildPrompt(question string, grounding []string) string {
+// buildPrompt frames the question with the recalled incidents, and with what
+// this team decided the last time something like it happened.
+//
+// The two are kept in separate sections and labelled differently on purpose.
+// Incidents are history; decisions are opinion, and a model given both without
+// being told which is which will treat a colleague's judgement as a fact about
+// the world.
+func buildPrompt(question string, grounding, precedents []string) string {
 	var b strings.Builder
 
 	if len(grounding) == 0 {
@@ -346,6 +392,19 @@ func buildPrompt(question string, grounding []string) string {
 		b.WriteString("Similar past incidents recalled from the CockroachDB incident store:\n")
 		for i, g := range grounding {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, g)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(precedents) > 0 {
+		b.WriteString("How this team decided similar cases before. These are judgements " +
+			"made by the engineers you work for, recorded after they reviewed proposed " +
+			"fixes. Weigh them — they tell you what this team values and what it has " +
+			"rejected before. Do not follow one against the evidence in front of you: " +
+			"the current incident is what is being decided, and a past decision that " +
+			"does not fit it is not a precedent.\n")
+		for i, p := range precedents {
+			fmt.Fprintf(&b, "\n--- past decision %d ---\n%s\n", i+1, p)
 		}
 		b.WriteString("\n")
 	}

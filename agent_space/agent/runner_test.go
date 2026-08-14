@@ -555,3 +555,80 @@ func TestRunReportsNotTruncatedWhenTheModelAnswers(t *testing.T) {
 		t.Errorf("Answer = %q, want the model's own words rather than the fallback", res.Answer)
 	}
 }
+
+// a PrecedentSource that returns fixed decisions, optionally failing
+type stubPrecedents struct {
+	docs []string
+	err  error
+}
+
+func (s stubPrecedents) Recall(context.Context, string, int) ([]string, error) {
+	return s.docs, s.err
+}
+
+func TestPastDecisionsReachThePromptAndStaySeparate(t *testing.T) {
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		textResponse("HOTFIX. The implicated commit is a3f9c21."),
+	}}
+
+	runner, _ := newRunner(t, model, stubStore{docs: []string{"INC-412: rolled back a3f9c21"}})
+	runner.Precedents = stubPrecedents{docs: []string{
+		"Remediation decision (2026-08-13), service checkout. Chosen fix (minimal strategy): widen the accumulator.",
+	}}
+
+	res, err := runner.Run(t.Context(), "Checkout is 500ing after this morning's deploy.", 1)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(res.Precedents) != 1 {
+		t.Errorf("Precedents = %v, want the one recalled decision", res.Precedents)
+	}
+	// recalled decisions must not be counted as incident sources, or the two
+	// kinds of recall become indistinguishable in the API
+	if res.Sources != 1 {
+		t.Errorf("Sources = %d, want 1: a decision is not a past incident", res.Sources)
+	}
+
+	prompt := renderMessages(model.lastMsgs)
+	for _, want := range []string{
+		"INC-412",
+		"Chosen fix (minimal strategy)",
+		// the framing is the guard against a past judgement being read as fact
+		"How this team decided similar cases before",
+		"Do not follow one against the evidence in front of you",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestPrecedentSectionIsAbsentWhenThereAreNone(t *testing.T) {
+	model := &scriptedModel{responses: []*llms.ContentResponse{textResponse("ROLLBACK a3f9c21.")}}
+
+	runner, _ := newRunner(t, model, stubStore{docs: []string{"INC-412: rolled back a3f9c21"}})
+	if _, err := runner.Run(t.Context(), "What broke?", 1); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if prompt := renderMessages(model.lastMsgs); strings.Contains(prompt, "How this team decided") {
+		t.Errorf("the precedent section appears with no precedents:\n%s", prompt)
+	}
+}
+
+// An index that is down must cost the precedents and nothing else.
+func TestRecallFailureDoesNotCostTheInvestigation(t *testing.T) {
+	model := &scriptedModel{responses: []*llms.ContentResponse{textResponse("ROLLBACK a3f9c21.")}}
+
+	runner, _ := newRunner(t, model, stubStore{})
+	runner.Precedents = stubPrecedents{err: errors.New("index unreachable")}
+
+	res, err := runner.Run(t.Context(), "What broke?", 1)
+	if err != nil {
+		t.Fatalf("Run returned an error for an unreachable decision index: %v", err)
+	}
+	if res.Answer != "ROLLBACK a3f9c21." {
+		t.Errorf("Answer = %q", res.Answer)
+	}
+}

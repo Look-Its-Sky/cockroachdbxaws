@@ -3,8 +3,10 @@ package routes
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +24,10 @@ const solutionsUnavailable = "Proposed fixes are not being stored. Check the dat
 // how long a read for the UI may take. These are single queries; the long work
 // happened somewhere else and is already written down.
 const readTimeout = 15 * time.Second
+
+// how long indexing a decision may take. Longer than a read, because it is an
+// embedding round trip to a provider rather than a query.
+const indexTimeout = 60 * time.Second
 
 // Repositories lists the service-to-repository mapping, for the UI's header and
 // for showing what "verified" means per service.
@@ -257,6 +263,212 @@ func OpenPullRequest(c *gin.Context) {
 		"pr_url":       url,
 		"verified":     candidate.Verification.Summary(),
 	})
+}
+
+// DecisionRequest is what the frontend posts when an engineer commits to a
+// choice.
+//
+// Every field is optional on its own. What is deliberately absent is anything
+// factual: the service, the strategy, and above all what was verified are read
+// back from the stored run. This text ends up in a document that shapes future
+// incidents, so a caller must not be able to assert that something passed tests
+// it never ran.
+type DecisionRequest struct {
+	ChosenCandidateID string             `json:"chosen_candidate_id"`
+	Rejections        []RejectionRequest `json:"rejections" binding:"omitempty,dive"`
+	EngineerFix       string             `json:"engineer_fix" binding:"max=4000"`
+	EngineerPRURL     string             `json:"engineer_pr_url" binding:"omitempty,url,max=500"`
+	Notes             string             `json:"notes" binding:"max=2000"`
+}
+
+// One candidate the engineer passed over. The reason is optional: where they
+// said nothing, it is filled in from what the sandbox established.
+type RejectionRequest struct {
+	CandidateID string `json:"candidate_id" binding:"required"`
+	Reason      string `json:"reason" binding:"max=1000"`
+}
+
+// RecordDecision stores an engineer's verdict on the proposed fixes and puts it
+// where the next similar incident will find it.
+//
+// This is the only point in the pipeline where human judgement is captured.
+// Everything before it records what a model produced or what a container
+// proved; without this the reasoning behind a pick is lost when the page closes.
+func RecordDecision(c *gin.Context) {
+	if Solutions == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": solutionsUnavailable})
+		return
+	}
+
+	var req DecisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := contextFor(c)
+	defer cancel()
+
+	outcome, found, err := Solutions.Load(ctx, c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no remediation for that investigation"})
+		return
+	}
+
+	reasons := make(map[string]string, len(req.Rejections))
+	for _, r := range req.Rejections {
+		reasons[r.CandidateID] = r.Reason
+	}
+
+	decision, err := remediation.NewDecision(outcome, remediation.DecisionInput{
+		ChosenCandidateID: req.ChosenCandidateID,
+		Reasons:           reasons,
+		EngineerFix:       req.EngineerFix,
+		EngineerPRURL:     req.EngineerPRURL,
+		Notes:             req.Notes,
+		IncidentSummary:   incidentProseFor(c, outcome),
+	})
+	switch {
+	case errors.Is(err, remediation.ErrEmptyDecision):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, remediation.ErrForeignCandidate):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	superseded, err := Solutions.SaveDecision(ctx, decision)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if len(superseded) > 0 {
+		log.Printf("Remediation: decision for %s replaces %d earlier one(s)",
+			decision.InvestigationID, len(superseded))
+	}
+
+	indexed, warning := indexDecision(decision, superseded)
+
+	log.Printf("Remediation: decision for %s (%s): %s, rejected %d (%d explained, %d auto), %s",
+		decision.InvestigationID, fallback(decision.ServiceID, "unknown service"),
+		chosenNote(outcome, decision), len(decision.Rejections),
+		decision.EngineerWroteReasons(),
+		len(decision.Rejections)-decision.EngineerWroteReasons(),
+		indexedNote(indexed))
+
+	body := gin.H{
+		"decision_id":           decision.ID,
+		"investigation_id":      decision.InvestigationID,
+		"chosen_candidate_id":   decision.ChosenCandidateID,
+		"rejected":              len(decision.Rejections),
+		"reasons_from_engineer": decision.EngineerWroteReasons(),
+		"reasons_auto":          len(decision.Rejections) - decision.EngineerWroteReasons(),
+		"indexed":               indexed,
+		// echoed so the UI can show what was actually learned, which makes a bad
+		// document obvious now rather than three incidents from now
+		"document": decision.Document,
+	}
+	if warning != "" {
+		body["warning"] = warning
+	}
+
+	c.JSON(http.StatusCreated, body)
+}
+
+// put the decision in the index, and drop any it replaced.
+//
+// Deliberately not on the request's context: an embedding call is an external
+// round trip, and a client that navigates away must not leave a decision stored
+// but unrecallable. A failure here is reported rather than swallowed, because
+// an unindexed decision is one the system will never learn from.
+func indexDecision(d remediation.Decision, superseded []string) (indexed bool, warning string) {
+	if PrecedentIndex == nil {
+		return false, "recorded, but there is no decision index configured, so it will not be recalled"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), indexTimeout)
+	defer cancel()
+
+	// order matters: drop the old documents first, so a failure to add the new
+	// one cannot leave a reversed judgement as the only precedent on file
+	if err := PrecedentIndex.Forget(ctx, superseded); err != nil {
+		log.Printf("Remediation: could not remove %d superseded decision(s) from the index: %v",
+			len(superseded), err)
+	}
+
+	if err := PrecedentIndex.Add(ctx, d); err != nil {
+		log.Printf("Remediation: decision %s is recorded but not indexed, so it will not be recalled: %v",
+			d.ID, err)
+		return false, "recorded, but indexing failed, so it will not be recalled: " + err.Error()
+	}
+
+	if Solutions != nil {
+		if err := Solutions.MarkIndexed(ctx, d.ID); err != nil {
+			// it is in the index; only the bookkeeping failed
+			log.Printf("Remediation: decision %s was indexed but not marked as such: %v", d.ID, err)
+		}
+	}
+	return true, ""
+}
+
+func chosenNote(o remediation.Outcome, d remediation.Decision) string {
+	if d.ChosenCandidateID == "" {
+		return "chose none of them"
+	}
+	for _, c := range o.Candidates {
+		if c.ID == d.ChosenCandidateID {
+			return "chose " + strconv.Quote(c.Strategy)
+		}
+	}
+	return "chose a candidate"
+}
+
+func indexedNote(indexed bool) string {
+	if indexed {
+		return "indexed"
+	}
+	return "NOT indexed"
+}
+
+// the prose the decision is written against, resolved server-side.
+//
+// Empty is acceptable: an incident row that has since been deleted must not
+// stop a decision being recorded, and the triage evidence still carries the
+// cause.
+func incidentProseFor(c *gin.Context, o remediation.Outcome) string {
+	if Incidents == nil || o.IncidentID == "" {
+		return ""
+	}
+
+	ctx, cancel := contextFor(c)
+	defer cancel()
+
+	inc, err := Incidents.Latest(ctx, o.IncidentID)
+	if err != nil {
+		return ""
+	}
+
+	return incident.BuildQuestion(queue.Assignment{
+		IncidentID:      o.IncidentID,
+		InvestigationID: o.InvestigationID,
+		ServiceID:       o.ServiceID,
+	}, inc)
+}
+
+func fallback(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // a bounded context for a read, derived from the request so a client that gives

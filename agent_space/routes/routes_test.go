@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +36,7 @@ func router() *gin.Engine {
 	guarded.GET("/agent/:id/remediation", RemediationFor)
 	guarded.POST("/agent/:id/remediation", StartRemediation)
 	guarded.POST("/solutions/:candidate/pr", OpenPullRequest)
+	guarded.POST("/agent/:id/decision", RecordDecision)
 
 	return r
 }
@@ -53,6 +55,7 @@ func TestRoutesRegisterWithoutConflicting(t *testing.T) {
 		"GET /agent/:id",
 		"GET /agent/:id/remediation",
 		"POST /agent/:id/remediation",
+		"POST /agent/:id/decision",
 		"POST /solutions/:candidate/pr",
 		"GET /repositories",
 		"GET /remediations",
@@ -76,6 +79,7 @@ func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
 		{http.MethodGet, "/agent/inv-1/remediation"},
 		{http.MethodPost, "/agent/inv-1/remediation"},
 		{http.MethodPost, "/solutions/cand-1/pr"},
+		{http.MethodPost, "/agent/inv-1/decision"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			w := httptest.NewRecorder()
@@ -83,6 +87,70 @@ func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
 
 			if w.Code != http.StatusServiceUnavailable {
 				t.Errorf("status = %d, want 503 with an explanation; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// The binding tags carry real validation, and two of them are easy to get
+// subtly wrong: without `dive` a rejection with no candidate_id is never
+// checked, and the caps are what stop unbounded text reaching a model prompt.
+func TestDecisionRequestBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name: "a pick with an explained rejection",
+			body: `{"chosen_candidate_id":"cand-1",
+			        "rejections":[{"candidate_id":"cand-2","reason":"too broad"}]}`,
+		},
+		{name: "a bare pick, with nothing typed", body: `{"chosen_candidate_id":"cand-1"}`},
+		{
+			name: "rejecting everything and describing the fix instead",
+			body: `{"engineer_fix":"widened the accumulator",
+			        "engineer_pr_url":"https://github.com/example/repo/pull/2"}`,
+		},
+
+		// dive: without it this element is never validated
+		{
+			name:    "a rejection with no candidate id",
+			body:    `{"chosen_candidate_id":"cand-1","rejections":[{"reason":"too broad"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "a reason past the cap",
+			body:    `{"chosen_candidate_id":"cand-1","rejections":[{"candidate_id":"c","reason":"` + strings.Repeat("x", 1001) + `"}]}`,
+			wantErr: true,
+		},
+		{
+			name:    "a note past the cap",
+			body:    `{"notes":"` + strings.Repeat("x", 2001) + `"}`,
+			wantErr: true,
+		},
+		{
+			name:    "a pull request url that is not a url",
+			body:    `{"engineer_fix":"did it by hand","engineer_pr_url":"not a url"}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/agent/inv-1/decision",
+				strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			var req DecisionRequest
+			err := c.ShouldBindJSON(&req)
+
+			if tc.wantErr && err == nil {
+				t.Errorf("binding accepted %s", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("binding rejected a valid body: %v", err)
 			}
 		})
 	}

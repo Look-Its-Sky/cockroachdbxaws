@@ -114,6 +114,10 @@ const (
 	// an engineer picked this one in the UI
 	CandidateSelected CandidateStatus = "selected"
 	CandidatePROpen   CandidateStatus = "pr_opened"
+	// an engineer saw this one and passed over it. Distinct from failed: a
+	// rejected candidate may have built and passed its tests and still been
+	// turned down, which is the judgement worth learning from.
+	CandidateRejected CandidateStatus = "rejected"
 	// the model would not produce a usable change, or the sandbox refused it
 	CandidateFailed CandidateStatus = "failed"
 )
@@ -148,6 +152,10 @@ type Candidate struct {
 	Status  CandidateStatus `json:"status"`
 	// PRURL is set once an engineer picks this candidate and the draft opens.
 	PRURL string `json:"pr_url,omitempty"`
+	// RejectionReason is why an engineer passed over this one. Empty until a
+	// decision is recorded, and separate from Error, which is the sandbox
+	// refusing a candidate rather than a human declining it.
+	RejectionReason string `json:"rejection_reason,omitempty"`
 	// Error explains a candidate that never got as far as a diff.
 	Error string `json:"error,omitempty"`
 

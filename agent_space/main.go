@@ -25,6 +25,8 @@ func main() {
 	utils.LoadConfig()
 
 	initStore()
+	// before the agent: it recalls past decisions alongside past incidents
+	initPrecedents()
 	initLLM()
 	initMCP()
 	defer mcpSess.Close()
@@ -43,6 +45,7 @@ func main() {
 	routes.Solutions = solutions
 	routes.Repos = repos
 	routes.Publisher = publisher
+	routes.PrecedentIndex = precedents
 	routes.Incidents = incident.NewResolver(pool)
 
 	router := gin.Default()
@@ -68,6 +71,8 @@ func main() {
 	guarded.GET("/agent/:id/remediation", routes.RemediationFor)
 	guarded.POST("/agent/:id/remediation", routes.StartRemediation)
 	guarded.POST("/solutions/:candidate/pr", routes.OpenPullRequest)
+	// where the loop closes: an engineer's pick, and why the rest were not
+	guarded.POST("/agent/:id/decision", routes.RecordDecision)
 
 	port := os.Getenv("PORT")
 	if port == "" {

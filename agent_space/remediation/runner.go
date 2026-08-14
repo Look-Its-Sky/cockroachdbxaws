@@ -70,6 +70,9 @@ type Runner struct {
 	// GitHubToken is only used to clone; a public repository needs none, and it
 	// never enters the sandbox for one.
 	GitHubToken string
+	// Precedents is what engineers decided on similar incidents. Nil proposes
+	// fixes exactly as it did before any decision was recorded.
+	Precedents *Precedents
 
 	Strategies           []Strategy
 	JobConcurrency       int
@@ -214,6 +217,7 @@ func (r *Runner) Run(ctx context.Context, req Request) Outcome {
 		Repository:      repo,
 		Sources:         sources,
 		Tree:            tree,
+		Precedents:      r.precedents(ctx, req, triage),
 	}
 
 	// drop a previous run's candidates before this one's land, or the UI offers
@@ -229,6 +233,31 @@ func (r *Runner) Run(ctx context.Context, req Request) Outcome {
 	Rank(outcome.Candidates)
 
 	return r.finish(ctx, outcome, RemediationDone, nil)
+}
+
+// what engineers decided on similar incidents.
+//
+// Queried on the incident prose plus what triage found, because that is what a
+// decision document leads with — a description of a fault, not a patch. Errors
+// are logged and dropped: past decisions make a fix better informed, they are
+// not a prerequisite for proposing one.
+func (r *Runner) precedents(ctx context.Context, req Request, t Triage) []string {
+	if r.Precedents == nil {
+		return nil
+	}
+
+	query := strings.TrimSpace(req.IncidentSummary + "\n" + t.Evidence)
+	found, err := r.Precedents.Recall(ctx, query, MaxPrecedents)
+	if err != nil {
+		log.Printf("Remediation: %s: could not recall past decisions, proposing without them: %v",
+			req.InvestigationID, err)
+		return nil
+	}
+	if len(found) > 0 {
+		log.Printf("Remediation: %s: %d past decision(s) informing the fixes",
+			req.InvestigationID, len(found))
+	}
+	return found
 }
 
 // triage reads the implicated commit and asks whether the fault is really there.

@@ -238,3 +238,39 @@ func TestBuildInspectScriptDropsPathsThatEscape(t *testing.T) {
 		t.Errorf("a path escaping the checkout reached the script:\n%s", script)
 	}
 }
+
+func TestProposalPromptCarriesPrecedentAsAConstraint(t *testing.T) {
+	in := ProposalInput{
+		IncidentSummary: "Checkout returned 500s on orders over $10.",
+		Repository:      Repository{ServiceID: "checkout", RuntimeImage: "golang:1.25", BuildCommand: "go build ./..."},
+		Precedents: []string{
+			"Remediation decision (2026-08-13). Chosen fix (minimal strategy): widen the accumulator. Rejected: root-cause: rewrote more than the incident justified [from the engineer].",
+		},
+	}
+
+	prompt := buildProposalPrompt(in)
+
+	for _, want := range []string{
+		"How this team has judged fixes before",
+		"widen the accumulator",
+		// the guard against every strategy collapsing onto the same answer:
+		// fan-out is only worth its containers while the three stay different
+		"Do NOT copy the fix that was chosen",
+		"the strategy you were given below still decides what you produce",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestProposalPromptOmitsPrecedentSectionWhenThereIsNone(t *testing.T) {
+	prompt := buildProposalPrompt(ProposalInput{
+		IncidentSummary: "Checkout returned 500s.",
+		Repository:      Repository{ServiceID: "checkout", RuntimeImage: "golang:1.25"},
+	})
+
+	if strings.Contains(prompt, "How this team has judged") {
+		t.Errorf("the precedent section appears with no precedents:\n%s", prompt)
+	}
+}

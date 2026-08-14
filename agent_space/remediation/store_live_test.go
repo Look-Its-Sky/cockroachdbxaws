@@ -118,3 +118,131 @@ func TestLiveAbandonStaleReclaimsRunningRemediations(t *testing.T) {
 		t.Errorf("second sweep moved finished_at from %v to %v", got.FinishedAt, again.FinishedAt)
 	}
 }
+
+// The decision write is a transaction across two tables, and the parts that
+// matter cannot be unit tested: the candidate statuses moving, a pull request
+// surviving, and a second decision replacing the first.
+func TestLiveDecisionRoundTrip(t *testing.T) {
+	solutions, pool, ctx := liveStore(t)
+
+	const (
+		inv      = "test-live-decision"
+		chosenID = "test-live-cand-chosen"
+		plainID  = "test-live-cand-plain"
+		withPRID = "test-live-cand-withpr"
+	)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, q := range []string{
+			`DELETE FROM ` + decisionTable + ` WHERE investigation_id = $1`,
+			`DELETE FROM ` + solutionTable + ` WHERE investigation_id = $1`,
+			`DELETE FROM ` + remediationTable + ` WHERE investigation_id = $1`,
+		} {
+			if _, err := pool.Exec(cleanupCtx, q, inv); err != nil {
+				t.Logf("cleanup: %v", err)
+			}
+		}
+	})
+
+	passing := Verification{Applied: true, BuildRan: true, Built: true, TestRan: true, Tested: true}
+	outcome := Outcome{
+		InvestigationID: inv,
+		IncidentID:      "test-incident",
+		ServiceID:       "checkout",
+		Status:          RemediationDone,
+		StartedAt:       time.Now().UTC(),
+		Candidates: []Candidate{
+			{ID: chosenID, InvestigationID: inv, Strategy: "defensive", Diff: "d", Verification: passing, Status: CandidateProposed, CreatedAt: time.Now().UTC()},
+			{ID: plainID, InvestigationID: inv, Strategy: "minimal", Diff: "d", Verification: passing, Status: CandidateProposed, CreatedAt: time.Now().UTC()},
+			{ID: withPRID, InvestigationID: inv, Strategy: "root-cause", Diff: "d", Verification: passing, Status: CandidateProposed, CreatedAt: time.Now().UTC()},
+		},
+	}
+	if err := solutions.Save(ctx, outcome); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// one candidate already has a draft open, which a decision must not undo
+	if err := solutions.MarkOpened(ctx, withPRID, "https://github.com/example/repo/pull/9"); err != nil {
+		t.Fatalf("MarkOpened: %v", err)
+	}
+
+	stored, _, err := solutions.Load(ctx, inv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	decision, err := NewDecision(stored, DecisionInput{
+		ChosenCandidateID: chosenID,
+		Reasons:           map[string]string{plainID: "too narrow to hold"},
+		IncidentSummary:   "Checkout returned 500s.",
+	})
+	if err != nil {
+		t.Fatalf("NewDecision: %v", err)
+	}
+
+	superseded, err := solutions.SaveDecision(ctx, decision)
+	if err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if len(superseded) != 0 {
+		t.Errorf("a first decision superseded %v", superseded)
+	}
+
+	got, found, err := solutions.Decision(ctx, inv)
+	if err != nil || !found {
+		t.Fatalf("Decision: found=%v err=%v", found, err)
+	}
+	if got.ChosenCandidateID != chosenID || len(got.Rejections) != 2 {
+		t.Errorf("decision did not round-trip: %+v", got)
+	}
+	if got.Document == "" {
+		t.Error("the document did not round-trip, so it could never be re-indexed")
+	}
+	if got.IndexedAt != nil {
+		t.Error("indexed_at is set before anything indexed it")
+	}
+
+	candidates, err := solutions.ListCandidates(ctx, inv)
+	if err != nil {
+		t.Fatalf("ListCandidates: %v", err)
+	}
+	for _, c := range candidates {
+		switch c.ID {
+		case chosenID:
+			if c.Status != CandidateSelected {
+				t.Errorf("chosen candidate status = %q, want %q", c.Status, CandidateSelected)
+			}
+		case plainID:
+			if c.Status != CandidateRejected || c.RejectionReason != "too narrow to hold" {
+				t.Errorf("rejected candidate = %q / %q", c.Status, c.RejectionReason)
+			}
+		case withPRID:
+			// the URL is the only link from the incident to the change
+			if c.Status != CandidatePROpen || c.PRURL == "" {
+				t.Errorf("a candidate with a PR open was moved to %q (url %q)", c.Status, c.PRURL)
+			}
+		}
+	}
+
+	// changing your mind replaces the decision rather than adding a second one
+	second, err := NewDecision(stored, DecisionInput{ChosenCandidateID: plainID, Notes: "actually the narrow one"})
+	if err != nil {
+		t.Fatalf("NewDecision (second): %v", err)
+	}
+	superseded, err = solutions.SaveDecision(ctx, second)
+	if err != nil {
+		t.Fatalf("SaveDecision (second): %v", err)
+	}
+	if len(superseded) != 1 || superseded[0] != decision.ID {
+		t.Errorf("superseded = %v, want the first decision %s", superseded, decision.ID)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM `+decisionTable+` WHERE investigation_id = $1`, inv).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d decisions on file, want 1: two contradictory precedents are worse than either", rows)
+	}
+}

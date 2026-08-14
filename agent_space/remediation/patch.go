@@ -218,6 +218,10 @@ type ProposalInput struct {
 	Repository      Repository
 	Sources         []Sourced
 	Tree            string
+	// Precedents are decisions engineers recorded on similar incidents: which
+	// fix they took and what they turned down. Empty is the ordinary case
+	// early on, and changes nothing.
+	Precedents []string
 }
 
 const proposalPrompt = `You are fixing a production fault in a service that is currently in incident.
@@ -289,6 +293,8 @@ func buildProposalPrompt(in ProposalInput) string {
 		b.WriteString(s)
 	}
 
+	writePrecedents(&b, in.Precedents)
+
 	fmt.Fprintf(&b, "\n\n## The service\n\n%s, in %s, built with `%s`.\n",
 		in.Repository.ServiceID, in.Repository.Redacted(), in.Repository.RuntimeImage)
 	if in.Repository.HasTests() {
@@ -351,6 +357,32 @@ Rules that matter:
 // expectation — while the reasoning about *what* to change was right. Throwing
 // that away and resampling from scratch costs the same and usually reproduces
 // the same class of slip; handing back the compiler output fixes it in one.
+// what this team has accepted and turned down before.
+//
+// Framed as a constraint rather than as an example, deliberately. The three
+// strategies are meant to differ, and the fan-out only earns its containers
+// while they do: a model shown "here is a fix that was accepted" will write
+// that fix three times over, and ranking is left with nothing to choose
+// between. What is useful here is the taste — how large a change this team
+// tolerates, what it calls out of scope — not the patch.
+func writePrecedents(b *strings.Builder, precedents []string) {
+	if len(precedents) == 0 {
+		return
+	}
+
+	b.WriteString("\n\n## How this team has judged fixes before\n\n")
+	b.WriteString("Decisions made by the engineers who will review you, on earlier " +
+		"incidents. Read them for what this team accepts and rejects: how large a " +
+		"change it tolerates, what it treats as out of scope, which trade-offs it " +
+		"has already argued out. Respect that as a constraint on what you write.\n\n" +
+		"Do NOT copy the fix that was chosen. It was written for a different fault, " +
+		"and the strategy you were given below still decides what you produce here.\n")
+
+	for i, p := range precedents {
+		fmt.Fprintf(b, "\n--- past decision %d ---\n%s\n", i+1, p)
+	}
+}
+
 func Repair(ctx context.Context, model llms.Model, in ProposalInput, previous Proposal, f Failure, s Strategy) (Proposal, error) {
 	if model == nil {
 		return Proposal{}, errors.New("remediation: no model configured")

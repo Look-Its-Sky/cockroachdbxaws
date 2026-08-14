@@ -35,6 +35,7 @@ var (
 	remediator *remediation.Runner
 	solutions  *remediation.Solutions
 	publisher  *remediation.Publisher
+	precedents *remediation.Precedents
 )
 
 const schemaLoadTimeout = 60 * time.Second
@@ -84,6 +85,40 @@ func initStore() {
 	}
 }
 
+// the index of decisions engineers have made, which is what lets the agent
+// learn from a pick rather than forgetting it.
+//
+// Its own collection, sharing the same physical tables as the incident index.
+// That is not tidiness: the store's filters are equality-only, so there is no
+// way to say "not a decision", and decisions living alongside the incidents
+// would quietly take recall slots away from the incident history the agent
+// depends on.
+func initPrecedents() {
+	embedder, err := utils.GetEmbedder()
+	if err != nil {
+		log.Printf("Decisions: no embedder, so decisions will be recorded but never recalled: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), schemaLoadTimeout)
+	defer cancel()
+
+	decisionStore, err := crdbvector.New(ctx,
+		crdbvector.WithConn(pool),
+		crdbvector.WithEmbedder(embedder),
+		crdbvector.WithVectorDimensions(utils.VectorDimensions()),
+		crdbvector.WithCollectionName(remediation.DecisionCollection),
+	)
+	if err != nil {
+		log.Printf("Decisions: index unavailable, so decisions will be recorded but never recalled: %v", err)
+		return
+	}
+
+	precedents = remediation.NewPrecedents(decisionStore, pool, crdbvector.DefaultEmbeddingStoreTableName)
+	log.Printf("Decisions: past picks are recalled from the %q collection, %d at a time",
+		remediation.DecisionCollection, remediation.MaxPrecedents)
+}
+
 func initLLM() {
 	var err error
 	if model, err = utils.GetLLM(); err != nil {
@@ -107,6 +142,13 @@ func initMCP() {
 
 	mcpSess = session
 	agentTools := session.Tools()
+	defer func() {
+		// nil is a working value: it means no decision has ever informed a
+		// verdict, which is exactly how this ran before decisions existed
+		if sreAgent != nil && precedents != nil {
+			sreAgent.Precedents = precedents
+		}
+	}()
 
 	if utils.EnvBool("AGENT_ALLOW_WRITE_TOOLS") {
 		log.Println("MCP: AGENT_ALLOW_WRITE_TOOLS is set; the agent can modify the cluster.")
@@ -282,6 +324,7 @@ func initRemediation() {
 		// only used to clone. The demo repository is public, so this is
 		// normally empty and no credential enters the container at all.
 		GitHubToken:          os.Getenv("GITHUB_TOKEN"),
+		Precedents:           precedents,
 		JobConcurrency:       envInt("REMEDIATION_JOBS", 0),
 		CandidateConcurrency: envInt("REMEDIATION_CANDIDATE_CONCURRENCY", 0),
 		// -1 turns repair off, which envInt cannot express: it treats anything

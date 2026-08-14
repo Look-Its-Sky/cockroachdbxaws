@@ -31,6 +31,9 @@ var (
 	Solutions   *remediation.Solutions
 	Repos       *remediation.Repositories
 	Publisher   *remediation.Publisher
+	// where recorded decisions are embedded so future incidents recall them.
+	// Nil records decisions without indexing them, which the response says.
+	PrecedentIndex *remediation.Precedents
 	// reads incident prose back for a remediation started from the API
 	Incidents *incident.Resolver
 )

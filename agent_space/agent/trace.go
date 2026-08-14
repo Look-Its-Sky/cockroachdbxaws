@@ -44,11 +44,15 @@ type Result struct {
 	Answer string `json:"answer"`
 	// the same decision as Answer, in a form the remediation pipeline can
 	// branch on without reading English
-	Verdict    Verdict  `json:"verdict"`
-	Sources    int      `json:"sources"`
-	Iterations int      `json:"iterations"`
-	Trace      []Step   `json:"trace"`
-	Grounding  []string `json:"grounding,omitempty"`
+	Verdict    Verdict `json:"verdict"`
+	Sources    int     `json:"sources"`
+	Iterations int     `json:"iterations"`
+	Trace      []Step  `json:"trace"`
+	// past incidents recalled from the index
+	Grounding []string `json:"grounding,omitempty"`
+	// past decisions this team recorded on similar incidents, kept separate
+	// from Grounding because they are opinion rather than history
+	Precedents []string `json:"precedents,omitempty"`
 	Truncated  bool     `json:"truncated"`
 }
 
