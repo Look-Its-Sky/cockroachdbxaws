@@ -16,58 +16,60 @@ work that is now done. They are not to-do lists and nothing in them is pending.
 
 ## Start here: the next piece of work
 
-**Candidate counts on `GET /remediations`.** Small, self-contained, and the last
-thing the frontend is blocked on.
+**Close the learning loop on camera.** Nothing in the code blocks the frontend
+any more — candidate counts landed 2026-08-14 (below) and that was the last item
+it was waiting on. What is left before the deadline is demo work, and this is the
+piece of it that nothing else demonstrates.
 
-The list endpoint returns remediation rows with no candidate information at all —
-deliberately, because a diff per candidate per row turns a list page into
-megabytes. But that also means a list row cannot show *"3 fixes · 1 chosen"*
-without an extra fetch per row, which is the one thing the picker's landing page
-needs.
+Record a decision on the checkout incident, re-run a similar investigation, and
+confirm the precedent appears in `result.precedents` and in the proposal prompt.
+Built, verified in parts, and never once witnessed end to end.
 
-- `Solutions.Recent` — `agent_space/remediation/store.go:525`
-- `Outcome` — `agent_space/remediation/candidate.go:171`
-
-Add two aggregates: how many candidates the run produced, and whether a decision
-has been recorded. Both are counts against tables that are already indexed on
-`investigation_id`.
-
-Two fields on `Outcome`, set only by `Recent` — the detail endpoint carries the
-candidates and the decision themselves, so a count there would be a second way to
-say the same thing and a second thing to keep in sync:
-
-```go
-// CandidateCount is how many fixes this run produced. Set by Recent only; the
-// detail endpoint carries the candidates themselves.
-CandidateCount int `json:"candidate_count,omitempty"`
-// Decided reports whether an engineer has recorded a decision on this run, so a
-// list row can distinguish "waiting for someone" from "dealt with".
-Decided bool `json:"decided"`
+```bash
+cd agent_space
+# 1. a decision on the run that already has candidates
+curl -sX POST localhost:8080/agent/<id>/decision -H 'Content-Type: application/json' \
+  -d '{"chosen_candidate_id":"<id>","rejections":[{"candidate_id":"<other>","reason":"rewrote more than the incident justified"}],"notes":"prefer arithmetic carry over branch-per-sign"}' | jq .document
+# 2. re-run and read the precedent section back
+./scripts/enqueue.sh -v 2
+curl -s localhost:8080/agent/<new-id> | jq '{grounding: (.result.grounding|length), precedents: .result.precedents}'
 ```
 
-On the SQL: the obvious `LEFT JOIN ... GROUP BY` aggregates every row in both
-tables before `LIMIT` throws almost all of it away. Prefer limiting first and
-counting against the survivors — a CTE that selects the page of `remediations`,
-then joins. Worth reading the plan CockroachDB actually picks rather than
-assuming; this runs against a Cloud Basic cluster where scans cost Request Units
-(see the note under [Watch the Request Units](#watch-the-request-units)).
+The success condition: `precedents` is non-empty **and** `grounding` is still 4.
+Precedent must not eat incident recall.
 
-`Decided` needs a `decisions` count, not a status check on the candidates — a
-chosen candidate can read back as `pr_opened` rather than `selected`, so
-candidate status is not a reliable signal that a decision exists.
+This costs Request Units — see [Watch the Request Units](#watch-the-request-units)
+— so do it in one batch with the SQS rehearsal and the `demo.sh` pass rather than
+three separate sessions.
 
-Then:
-
-1. Extend the live test in `remediation/store_live_test.go` — a run with three
-   candidates and a decision reads back `candidate_count: 3, decided: true`.
-   The existing `TestLiveDecisionRoundTrip` already builds exactly that fixture.
-2. Delete the "Candidate counts on `GET /remediations`" bullet from **Not there
-   yet** in `agent_space/docs/frontend-api.md`, and document the two fields in
-   the `GET /remediations` section.
-
-After that, the remaining gaps are listed under
-[Worth doing if there is time](#worth-doing-if-there-is-time). None blocks the
+Everything after it is in [Next steps, in order](#next-steps-in-order); the
+remaining code gaps are under
+[Worth doing if there is time](#worth-doing-if-there-is-time) and none blocks the
 demo.
+
+### Candidate counts — done 2026-08-14
+
+`GET /remediations` rows now carry `candidate_count` and `decided`, so the
+picker's landing page can render *"3 fixes · dealt with"* without a fetch per row.
+
+- `Solutions.Recent` takes its page first and looks the aggregates up against it
+  — a CTE plus two subqueries on `investigation_id`, which both tables already
+  index. The obvious `LEFT JOIN ... GROUP BY` would have aggregated every
+  candidate ever proposed and then thrown all but a pageful away, which on a
+  Basic cluster is billed.
+- `decided` counts `decisions` rather than reading candidate status, because a
+  chosen candidate that already has a draft PR keeps `pr_opened` rather than
+  being downgraded to `selected`.
+- It is also set by `Load`, from the decision that call already reads. The plan
+  said "`Recent` only", but that would have had the detail endpoint answer
+  `"decided": false` while carrying the decision beside it.
+- `candidate_count` counts stored candidates, including ones that failed to
+  build. It is not a count of usable fixes.
+
+**The SQL plan is unverified.** `TestLiveDecisionRoundTrip` covers the values —
+three candidates, decided true before and after — but nobody has run `EXPLAIN` to
+confirm CockroachDB limits before it counts rather than decorrelating into a full
+scan. Worth one look while the live suite is running anyway.
 
 ---
 
@@ -258,31 +260,11 @@ Not fixed. A length-ratio check against the original, or a scan for
 
 ## Next steps, in order
 
-### 1. Candidate counts on `GET /remediations`
+### 1. Close the learning loop on camera
 
 See [Start here](#start-here-the-next-piece-of-work).
 
-### 2. Close the learning loop on camera
-
-Record a decision on the checkout incident, re-run a similar investigation, and
-confirm the precedent appears in `result.precedents` and in the proposal prompt.
-This is the part of the submission nothing else demonstrates, and it is currently
-built but unwitnessed.
-
-```bash
-cd agent_space
-# 1. a decision on the run that already has candidates
-curl -sX POST localhost:8080/agent/<id>/decision -H 'Content-Type: application/json' \
-  -d '{"chosen_candidate_id":"<id>","rejections":[{"candidate_id":"<other>","reason":"rewrote more than the incident justified"}],"notes":"prefer arithmetic carry over branch-per-sign"}' | jq .document
-# 2. re-run and read the precedent section back
-./scripts/enqueue.sh -v 2
-curl -s localhost:8080/agent/<new-id> | jq '{grounding: (.result.grounding|length), precedents: .result.precedents}'
-```
-
-The success condition: `precedents` is non-empty **and** `grounding` is still 4.
-Precedent must not eat incident recall.
-
-### 3. Real SQS rehearsal
+### 2. Real SQS rehearsal
 
 Config-only but **unproven**. Development runs against LocalStack on `:4566`; the
 demo is meant to run against real SQS.
@@ -295,19 +277,19 @@ logged rather than quietly sending every poll to LocalStack.
 What has never happened: a real queue created, real credentials set, one
 assignment delivered end to end. Do it before the demo, not during.
 
-### 4. Pick the deploy target
+### 3. Pick the deploy target
 
 Still undecided, and it is a **design input** rather than a detail — see
 [Deploy and demo](#deploy-and-demo). Decide before building anything for it.
 
-### 5. Run `demo.sh` end to end, against a seeded cluster
+### 4. Run `demo.sh` end to end, against a seeded cluster
 
 Still the thing you will lean on while recording, and steps 3-4 of the script
 have never been run in one pass. **Run `scripts/seed-cluster.sql` first** — see
 the seeding trap below, which is the single most expensive thing on this page to
 get wrong.
 
-### 6. `GIN_MODE=release` and an OpenRouter spend cap
+### 5. `GIN_MODE=release` and an OpenRouter spend cap
 
 Neither is code. The server is in debug mode, logging every route and request.
 The spend cap is the only control that still works when the code is wrong.
