@@ -119,6 +119,24 @@ func TestLiveAbandonStaleReclaimsRunningRemediations(t *testing.T) {
 	}
 }
 
+// one run's row as the list page sees it. Searched for rather than read off the
+// front, because the cluster is shared and another run may land first.
+func findRecent(t *testing.T, ctx context.Context, s *Solutions, investigationID string) Outcome {
+	t.Helper()
+
+	recent, err := s.Recent(ctx, 200)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	for _, o := range recent {
+		if o.InvestigationID == investigationID {
+			return o
+		}
+	}
+	t.Fatalf("%s is missing from Recent", investigationID)
+	return Outcome{}
+}
+
 // The decision write is a transaction across two tables, and the parts that
 // matter cannot be unit tested: the candidate statuses moving, a pull request
 // surviving, and a second decision replacing the first.
@@ -164,6 +182,13 @@ func TestLiveDecisionRoundTrip(t *testing.T) {
 	// one candidate already has a draft open, which a decision must not undo
 	if err := solutions.MarkOpened(ctx, withPRID, "https://github.com/example/repo/pull/9"); err != nil {
 		t.Fatalf("MarkOpened: %v", err)
+	}
+
+	// before any decision: the run has fixes waiting on someone, which is the
+	// state the landing page most needs to pick out
+	if undecided := findRecent(t, ctx, solutions, inv); undecided.CandidateCount != 3 || undecided.Decided {
+		t.Errorf("undecided run listed as candidate_count=%d decided=%v, want 3 and false",
+			undecided.CandidateCount, undecided.Decided)
 	}
 
 	stored, _, err := solutions.Load(ctx, inv)
@@ -236,6 +261,22 @@ func TestLiveDecisionRoundTrip(t *testing.T) {
 				t.Errorf("a candidate with a PR open was moved to %q (url %q)", c.Status, c.PRURL)
 			}
 		}
+	}
+
+	// The list page shows "3 fixes · dealt with" off these two aggregates alone,
+	// so they are what stops the picker's landing page fetching a full set of
+	// diffs per row just to render a count.
+	listed := findRecent(t, ctx, solutions, inv)
+	if listed.CandidateCount != 3 {
+		t.Errorf("candidate_count = %d, want 3", listed.CandidateCount)
+	}
+	if !listed.Decided {
+		t.Error("a run with a decision on file reads back as undecided")
+	}
+	// the counts must not have dragged the diffs along with them, which is the
+	// whole reason the list endpoint omits candidates
+	if len(listed.Candidates) != 0 {
+		t.Errorf("Recent returned %d candidates; the list page must stay small", len(listed.Candidates))
 	}
 
 	// changing your mind replaces the decision rather than adding a second one

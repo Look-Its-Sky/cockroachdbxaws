@@ -310,6 +310,10 @@ func (s *Solutions) Load(ctx context.Context, investigationID string) (Outcome, 
 		log.Printf("remediation: could not read the decision for %s: %v", investigationID, err)
 	} else if found {
 		o.Decision = &decision
+		// the same flag the list rows carry. Derived from the decision already
+		// in hand rather than counted again, so the two endpoints cannot
+		// disagree about whether a run has been dealt with.
+		o.Decided = true
 	}
 	return o, true, nil
 }
@@ -527,13 +531,28 @@ func (s *Solutions) Recent(ctx context.Context, limit int) ([]Outcome, error) {
 		limit = 50
 	}
 
+	// The page is taken first and the aggregates are looked up against it, not
+	// the other way round. The obvious LEFT JOIN ... GROUP BY would aggregate
+	// every candidate of every run ever proposed and then throw all but a
+	// pageful away — on a Basic cluster that scan is billed in Request Units.
+	// Both lookups hit an index that is keyed on investigation_id already.
 	const q = `
-		SELECT investigation_id, coalesce(incident_id, ''), coalesce(service_id, ''),
-		       status, coalesce(triage::STRING, ''), coalesce(error, ''),
-		       started_at, finished_at
-		FROM ` + remediationTable + `
-		ORDER BY started_at DESC
-		LIMIT $1`
+		WITH page AS (
+			SELECT investigation_id, incident_id, service_id, status, triage,
+			       error, started_at, finished_at
+			FROM ` + remediationTable + `
+			ORDER BY started_at DESC
+			LIMIT $1
+		)
+		SELECT p.investigation_id, coalesce(p.incident_id, ''), coalesce(p.service_id, ''),
+		       p.status, coalesce(p.triage::STRING, ''), coalesce(p.error, ''),
+		       p.started_at, p.finished_at,
+		       (SELECT count(*) FROM ` + solutionTable + ` c
+		          WHERE c.investigation_id = p.investigation_id),
+		       EXISTS (SELECT 1 FROM ` + decisionTable + ` d
+		          WHERE d.investigation_id = p.investigation_id)
+		FROM page p
+		ORDER BY p.started_at DESC`
 
 	rows, err := s.Pool.Query(ctx, q, limit)
 	if err != nil {
@@ -552,6 +571,7 @@ func (s *Solutions) Recent(ctx context.Context, limit int) ([]Outcome, error) {
 		if err := rows.Scan(
 			&o.InvestigationID, &o.IncidentID, &o.ServiceID, &status,
 			&triage, &o.Error, &o.StartedAt, &finishedAt,
+			&o.CandidateCount, &o.Decided,
 		); err != nil {
 			return nil, fmt.Errorf("remediation: scan remediation: %w", err)
 		}

@@ -179,6 +179,19 @@ type Outcome struct {
 	Triage     *Triage     `json:"triage,omitempty"`
 	// Candidates, best first. Empty when triage stopped the run.
 	Candidates []Candidate `json:"candidates,omitempty"`
+	// CandidateCount is how many fixes this run produced. Set by Recent only,
+	// so a list row can say "3 fixes" without fetching a diff per candidate;
+	// the detail endpoint carries the candidates themselves and counting them
+	// again there would be a second way to say the same thing.
+	CandidateCount int `json:"candidate_count,omitempty"`
+	// Decided reports whether an engineer has recorded a decision on this run,
+	// so a list row can distinguish "waiting for someone" from "dealt with".
+	//
+	// Counted against decisions rather than read off the candidates: a chosen
+	// candidate keeps its pr_opened status rather than being downgraded to
+	// selected, so candidate status is not a reliable signal that a decision
+	// exists.
+	Decided bool `json:"decided"`
 	// Decision is what an engineer concluded, once one has. Carried here so the
 	// picker can tell an undecided run from a decided one in the single call it
 	// already makes — without it, a reload cannot show which fix was taken, and

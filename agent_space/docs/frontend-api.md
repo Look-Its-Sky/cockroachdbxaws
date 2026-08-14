@@ -129,6 +129,8 @@ Query: `?limit=50` — default 50, values above 200 or below 1 fall back to 50.
       "service_id": "checkout",
       "status": "done",
       "triage": { "...": "see below" },
+      "candidate_count": 3,
+      "decided": true,
       "started_at": "2026-08-14T09:12:04Z",
       "finished_at": "2026-08-14T09:18:41Z"
     }
@@ -140,8 +142,22 @@ Query: `?limit=50` — default 50, values above 200 or below 1 fall back to 50.
 a list page that shipped every diff for every run would be megabytes. Fetch the
 detail endpoint for the run the engineer clicks on.
 
-The same omission means this endpoint cannot yet tell you "3 fixes · 1 chosen"
-for a row — see [Not there yet](#not-there-yet).
+Two aggregates stand in for them, so a row can read *"3 fixes · dealt with"*
+without a fetch per row:
+
+| Field | Meaning |
+| --- | --- |
+| `candidate_count` | How many fixes the run produced. **Omitted when zero** — a run triage stopped has no candidates, so treat absent as `0`. |
+| `decided` | Whether an engineer has recorded a decision. Always present. |
+
+`decided` counts decisions, not candidate statuses. Do not try to derive it
+yourself from `status == "selected"`: a chosen candidate that already has a draft
+PR keeps `pr_opened`, so the status of the candidates never reliably tells you
+whether someone has decided.
+
+`candidate_count` counts every candidate the run stored, including ones that
+failed to build. It is not a count of *usable* fixes — for that you need the
+detail endpoint and `verification`.
 
 **`503`** if the database is not configured.
 
@@ -169,11 +185,17 @@ the engineer's decision if one has been recorded.
     "confidence": 0.8
   },
   "candidates": [ "..." ],
+  "decided": true,
   "decision": { "..." },
   "started_at": "2026-08-14T09:12:04Z",
   "finished_at": "2026-08-14T09:18:41Z"
 }
 ```
+
+`decided` is here too, and always agrees with `decision` being present — it is
+the same field the list rows carry, so a component written against a list row
+also renders a detail response. `candidate_count` is *not* set here; the
+candidates themselves are in hand, so count those.
 
 ### `status`
 
@@ -614,9 +636,6 @@ want a "what can this thing see" panel; not needed for the picker.
 
 Say the word on any of these and they get built — none is large.
 
-- **Candidate counts on `GET /remediations`.** A list row cannot currently show
-  "3 fixes · 1 chosen" without an extra fetch per row. Needs a `GROUP BY` in the
-  list query.
 - **A capability endpoint.** Right now the only way to learn that PR opening is
   unconfigured is to try it and get a `503`. A single `GET /capabilities` would
   let the UI disable the button up front instead of surfacing an error the
