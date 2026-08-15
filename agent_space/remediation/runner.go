@@ -1,0 +1,563 @@
+package remediation
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/tmc/langchaingo/llms"
+)
+
+// one investigation handed over for remediation
+type Request struct {
+	InvestigationID string
+	IncidentID      string
+	ServiceID       string
+	// the prose the investigation was run against
+	IncidentSummary string
+	// what the agent concluded, in its own words
+	VerdictAnswer string
+	// the commit the verdict implicated; empty means triage has
+	// nothing to read, which it reports rather than guessing around.
+	CommitSHA string
+}
+
+// how long each kind of container may run; the read-only stages are a clone and
+// some git plumbing, so they need minutes rather than a build's quarter hour
+const (
+	inspectTimeout   = 6 * time.Minute
+	candidateTimeout = DefaultSandboxTimeout
+)
+
+// how long a whole remediation may take, so a job cannot occupy a slot forever
+const jobTimeout = 45 * time.Minute
+
+// defaults for the pool. Two jobs at a time, three containers each, is six
+// containers on a demo laptop — which is about what one will take.
+const (
+	defaultJobConcurrency       = 2
+	defaultCandidateConcurrency = 3
+	defaultQueueDepth           = 32
+	// one round: a model that cannot fix its own compiler error when shown it
+	// once will not manage it on the fifth, and each round costs a container
+	defaultMaxRepairs = 1
+)
+
+// turns a verdict into ranked, verified candidate fixes. Asynchronous with its
+// own pool on purpose: doing N fifteen-minute containers inline would stop the
+// worker consuming the queue while a detector keeps producing.
+type Runner struct {
+	Repos   *Repositories
+	Sandbox Sandbox
+	Model   llms.Model
+	// persists outcomes; nil keeps everything in memory, the way the
+	// worker's journal is optional: durability is not worth refusing to run for.
+	Store *Solutions
+	// only used to clone; a public repository needs none, and it
+	// never enters the sandbox for one.
+	GitHubToken string
+	// what engineers decided on similar incidents; nil proposes
+	// fixes exactly as it did before any decision was recorded.
+	Precedents *Precedents
+
+	Strategies           []Strategy
+	JobConcurrency       int
+	CandidateConcurrency int
+	// how many times a candidate is shown its own failure and
+	// asked again. 0 uses defaultMaxRepairs; negative turns repair off.
+	MaxRepairs int
+
+	jobs     chan Request
+	started  sync.Once
+	inFlight sync.Map // investigation id -> struct{}, so a redelivery is not fanned out twice
+
+	// the repository lookup, substituted by tests so the pipeline can be driven
+	// without a database. Nil means Repos.Get, which is the only production path.
+	lookup func(ctx context.Context, serviceID string) (Repository, error)
+}
+
+func (r *Runner) repository(ctx context.Context, serviceID string) (Repository, error) {
+	if r.lookup != nil {
+		return r.lookup(ctx, serviceID)
+	}
+	if r.Repos == nil {
+		return Repository{}, errors.New("remediation: no repository mapping is configured")
+	}
+	return r.Repos.Get(ctx, serviceID)
+}
+
+// brings up the pool; safe to call more than once, only the first counts
+func (r *Runner) Start(ctx context.Context) {
+	r.started.Do(func() {
+		r.jobs = make(chan Request, defaultQueueDepth)
+
+		workers := r.JobConcurrency
+		if workers <= 0 {
+			workers = defaultJobConcurrency
+		}
+
+		for range workers {
+			go func() {
+				for req := range r.jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					r.runJob(ctx, req)
+				}
+			}()
+		}
+
+		log.Printf("Remediation: %d concurrent jobs, %d candidates each",
+			workers, len(r.strategies()))
+	})
+}
+
+// hands an investigation over and returns immediately, false when the pool is
+// full or it is already running; the caller acks either way, since a dropped
+// remediation must not cost a verdict already paid for
+func (r *Runner) Enqueue(req Request) bool {
+	if r == nil || r.jobs == nil {
+		return false
+	}
+	if _, busy := r.inFlight.LoadOrStore(req.InvestigationID, struct{}{}); busy {
+		return false
+	}
+
+	select {
+	case r.jobs <- req:
+		return true
+	default:
+		r.inFlight.Delete(req.InvestigationID)
+		log.Printf("Remediation: queue is full, not remediating %s", req.InvestigationID)
+		return false
+	}
+}
+
+func (r *Runner) runJob(ctx context.Context, req Request) {
+	defer r.inFlight.Delete(req.InvestigationID)
+
+	// derived from the process, never from the message: a remediation outlives
+	// the SQS visibility timeout by design, since the message is long acked
+	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
+	defer cancel()
+
+	outcome := r.Run(jobCtx, req)
+	log.Printf("Remediation: %s: %s (%d candidates)",
+		req.InvestigationID, outcome.Status, len(outcome.Candidates))
+}
+
+// remediates one investigation synchronously, returning an Outcome rather than
+// an error: every failure here is something to read next to the incident
+func (r *Runner) Run(ctx context.Context, req Request) Outcome {
+	outcome := Outcome{
+		InvestigationID: req.InvestigationID,
+		IncidentID:      req.IncidentID,
+		ServiceID:       req.ServiceID,
+		Status:          RemediationRunning,
+		StartedAt:       time.Now().UTC(),
+	}
+	r.save(ctx, outcome)
+
+	repo, err := r.repository(ctx, req.ServiceID)
+	if err != nil {
+		return r.finish(ctx, outcome, RemediationFailed, err)
+	}
+	outcome.Repository = &repo
+
+	cloneURL := repo.CloneURL(r.GitHubToken)
+
+	// the gate. Its whole purpose is to be cheap relative to what follows, so
+	// it runs before any candidate container is started.
+	triage, sections, err := r.triage(ctx, repo, cloneURL, req)
+	if err != nil {
+		return r.finish(ctx, outcome, RemediationFailed, err)
+	}
+	outcome.Triage = &triage
+	r.save(ctx, outcome)
+
+	if !triage.ShouldRemediate() {
+		log.Printf("Remediation: %s: triage says %s, not proposing fixes",
+			req.InvestigationID, triage.Status)
+		return r.finish(ctx, outcome, RemediationStopped, nil)
+	}
+
+	sources, tree, err := r.inspect(ctx, repo, cloneURL, req.CommitSHA, filesToRead(triage, sections))
+	if err != nil {
+		return r.finish(ctx, outcome, RemediationFailed, err)
+	}
+	if len(readable(sources)) == 0 {
+		return r.finish(ctx, outcome, RemediationFailed,
+			errors.New("remediation: none of the implicated files could be read from the checkout"))
+	}
+
+	in := ProposalInput{
+		IncidentSummary: req.IncidentSummary,
+		VerdictAnswer:   req.VerdictAnswer,
+		TriageEvidence:  triage.Evidence,
+		Repository:      repo,
+		Sources:         sources,
+		Tree:            tree,
+		Precedents:      r.precedents(ctx, req, triage),
+	}
+
+	// drop a previous run's candidates before this one's land, or the UI offers
+	// two generations of fix side by side with no way to tell them apart
+	if r.Store != nil {
+		if err := r.Store.Supersede(ctx, req.InvestigationID); err != nil {
+			log.Printf("Remediation: %s: could not clear the previous candidates: %v",
+				req.InvestigationID, err)
+		}
+	}
+
+	outcome.Candidates = r.fanOut(ctx, repo, cloneURL, req, in)
+	Rank(outcome.Candidates)
+
+	return r.finish(ctx, outcome, RemediationDone, nil)
+}
+
+// what engineers decided on similar incidents, queried on the incident prose
+// plus triage, since a decision document leads with a fault description.
+// Errors are dropped: precedent informs a fix, it is not a prerequisite.
+func (r *Runner) precedents(ctx context.Context, req Request, t Triage) []string {
+	if r.Precedents == nil {
+		return nil
+	}
+
+	query := strings.TrimSpace(req.IncidentSummary + "\n" + t.Evidence)
+	found, err := r.Precedents.Recall(ctx, query, MaxPrecedents)
+	if err != nil {
+		log.Printf("Remediation: %s: could not recall past decisions, proposing without them: %v",
+			req.InvestigationID, err)
+		return nil
+	}
+	if len(found) > 0 {
+		log.Printf("Remediation: %s: %d past decision(s) informing the fixes",
+			req.InvestigationID, len(found))
+	}
+	return found
+}
+
+// triage reads the implicated commit and asks whether the fault is really there.
+func (r *Runner) triage(ctx context.Context, repo Repository, cloneURL string, req Request) (Triage, map[string]Section, error) {
+	if strings.TrimSpace(req.CommitSHA) == "" {
+		// no commit to read means the gate cannot do its job, which is a
+		// finding rather than a reason to fan out blind
+		return Triage{
+			Status: TriageCommitMissing,
+			Evidence: "The investigation did not implicate a commit, so there is nothing to read. " +
+				"A fix cannot be proposed without knowing what changed.",
+		}, nil, nil
+	}
+
+	run, err := r.Sandbox.Run(ctx, Spec{
+		Image:   repo.RuntimeImage,
+		Script:  BuildTriageScript(repo, cloneURL, req.CommitSHA),
+		Timeout: inspectTimeout,
+	})
+	if err != nil {
+		return Triage{}, nil, fmt.Errorf("remediation: triage sandbox: %w", err)
+	}
+
+	sections := ParseSections(run.Output)
+	if !sections[stageClone].Passed() {
+		return Triage{}, nil, fmt.Errorf("remediation: could not clone %s: %s",
+			repo.Redacted(), clip(sections[stageClone].Output, 500))
+	}
+
+	triage, err := Judge(ctx, r.Model, req.IncidentSummary, req.VerdictAnswer, sections)
+	if err != nil {
+		return Triage{}, sections, err
+	}
+	return triage, sections, nil
+}
+
+// reads the implicated files out of a fresh checkout, whole. A second clone
+// after triage's, deliberately: nothing past the gate is paid for before it passes.
+func (r *Runner) inspect(ctx context.Context, repo Repository, cloneURL, sha string, files []string) ([]Sourced, string, error) {
+	if len(files) == 0 {
+		return nil, "", errors.New("remediation: triage named no files to read")
+	}
+
+	run, err := r.Sandbox.Run(ctx, Spec{
+		Image:   repo.RuntimeImage,
+		Script:  BuildInspectScript(repo, cloneURL, sha, files),
+		Timeout: inspectTimeout,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("remediation: inspect sandbox: %w", err)
+	}
+
+	sections := ParseSections(run.Output)
+	if !sections[stageClone].Passed() {
+		return nil, "", fmt.Errorf("remediation: could not clone %s to read it: %s",
+			repo.Redacted(), clip(sections[stageClone].Output, 500))
+	}
+
+	return ParseSources(sections), sections[stageTree].Output, nil
+}
+
+// fanOut proposes and verifies one candidate per strategy, concurrently.
+func (r *Runner) fanOut(ctx context.Context, repo Repository, cloneURL string, req Request, in ProposalInput) []Candidate {
+	strategies := r.strategies()
+	candidates := make([]Candidate, len(strategies))
+
+	limit := r.CandidateConcurrency
+	if limit <= 0 {
+		limit = defaultCandidateConcurrency
+	}
+	sem := make(chan struct{}, limit)
+
+	var wg sync.WaitGroup
+	for i, s := range strategies {
+		wg.Add(1)
+		go func(i int, s Strategy) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			candidates[i] = r.candidate(ctx, repo, cloneURL, req, in, s)
+		}(i, s)
+	}
+	wg.Wait()
+
+	return candidates
+}
+
+// one strategy, start to finish: ask the model, then find out whether it worked.
+func (r *Runner) candidate(ctx context.Context, repo Repository, cloneURL string, req Request, in ProposalInput, s Strategy) Candidate {
+	c := Candidate{
+		ID:              uuid.NewString(),
+		InvestigationID: req.InvestigationID,
+		IncidentID:      req.IncidentID,
+		ServiceID:       req.ServiceID,
+		Strategy:        s.Name,
+		Status:          CandidateProposed,
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	proposal, err := Propose(ctx, r.Model, in, s)
+	if err != nil {
+		return c.failed(err.Error())
+	}
+
+	c.Summary = proposal.Summary
+	c.Rationale = proposal.Rationale
+
+	if len(proposal.Edits) == 0 {
+		// a model that declines to change working code is doing the right thing
+		return c.failed("the model proposed no change: " + fallback(proposal.Summary, "it gave no reason"))
+	}
+
+	// propose, verify, and show the model its own output when the toolchain
+	// rejects it for a reason it can act on
+	for attempt := 0; ; attempt++ {
+		apply, err := ApplyCommand(proposal.Edits)
+		if err != nil {
+			return c.failed(err.Error())
+		}
+
+		c.Files = c.Files[:0]
+		for _, e := range proposal.Edits {
+			c.Files = append(c.Files, e.Path)
+		}
+		c.Edits = proposal.Edits
+		c.Summary = fallback(proposal.Summary, c.Summary)
+		c.Rationale = fallback(proposal.Rationale, c.Rationale)
+
+		run, err := r.Sandbox.Run(ctx, Spec{
+			Image:   repo.RuntimeImage,
+			Script:  BuildScript(repo, cloneURL, req.CommitSHA, apply),
+			Timeout: candidateTimeout,
+		})
+		if err != nil {
+			return c.failed(err.Error())
+		}
+
+		sections := ParseSections(run.Output)
+		if !sections[stageClone].Passed() {
+			return c.failed("could not clone the repository to verify the change")
+		}
+
+		c.Verification = verificationFrom(sections, run)
+		c.Diff = sections[stageDiff].Output
+
+		// a change that applied cleanly but altered nothing is not a fix, and
+		// showing an engineer an empty diff wastes the one thing they are short of
+		if c.Verification.Applied && strings.TrimSpace(c.Diff) == "" {
+			return c.failed("the change was written but left the repository identical")
+		}
+
+		if c.Verification.Satisfied(repo) || attempt >= r.repairBudget() || !c.Verification.NeedsRepair() {
+			return c
+		}
+
+		failure := failureFrom(sections)
+		log.Printf("Remediation: %s: %s failed at %s, repairing (round %d)",
+			req.InvestigationID, s.Name, failure.Stage, attempt+1)
+
+		repaired, err := Repair(ctx, r.Model, in, proposal, failure, s)
+		if err != nil {
+			// the unrepaired candidate is still worth showing as what it is
+			log.Printf("Remediation: %s: repair (%s) failed, keeping the unrepaired candidate: %v",
+				req.InvestigationID, s.Name, err)
+			return c
+		}
+		if len(repaired.Edits) == 0 {
+			// silent here would be indistinguishable from repair never having
+			// been attempted, which is exactly the confusion this cost once
+			log.Printf("Remediation: %s: repair (%s) came back with no files to write (%q); "+
+				"keeping the unrepaired candidate",
+				req.InvestigationID, s.Name, clip(repaired.Summary, 120))
+			return c
+		}
+
+		proposal = repaired
+		c.Repairs = attempt + 1
+	}
+}
+
+func (r *Runner) repairBudget() int {
+	if r.MaxRepairs > 0 {
+		return r.MaxRepairs
+	}
+	if r.MaxRepairs < 0 {
+		return 0
+	}
+	return defaultMaxRepairs
+}
+
+// which stage to quote back, preferring the build: a compilation failure makes
+// the test stage fail too, and its output is the compiler's either way
+func failureFrom(sections map[string]Section) Failure {
+	if build := sections[stageBuild]; build.Ran && !build.Passed() {
+		return Failure{Stage: stageBuild, Log: build.Output}
+	}
+	return Failure{Stage: stageTest, Log: sections[stageTest].Output}
+}
+
+func (c Candidate) failed(reason string) Candidate {
+	c.Status = CandidateFailed
+	c.Error = reason
+	return c
+}
+
+// read the stages back as a claim about what was proven
+func verificationFrom(sections map[string]Section, run Run) Verification {
+	harness := sections[stageHarness]
+	build := sections[stageBuild]
+	test := sections[stageTest]
+
+	v := Verification{
+		Applied:    harness.Passed(),
+		BuildRan:   build.Ran,
+		Built:      build.Passed(),
+		TestRan:    test.Ran,
+		Tested:     test.Passed(),
+		TimedOut:   run.TimedOut,
+		DurationMS: run.Duration.Milliseconds(),
+	}
+
+	// the log is what an engineer reads when this failed, so it is the failing
+	// stage's output rather than the whole container's
+	switch {
+	case !v.Applied:
+		v.Log = clip(harness.Output, maxLogChars)
+	case v.TestRan && !v.Tested:
+		v.Log = clip(test.Output, maxLogChars)
+	case v.BuildRan && !v.Built:
+		v.Log = clip(build.Output, maxLogChars)
+	}
+	return v
+}
+
+// how much of a failing stage to keep. A Go test failure is a few lines; a
+// compiler having a bad day is not, and none of it belongs in a database row.
+const maxLogChars = 8000
+
+// which files to read whole before proposing a fix: what triage named, falling
+// back to what the commit touched when it named nothing.
+func filesToRead(t Triage, sections map[string]Section) []string {
+	if len(t.Files) > 0 {
+		return t.Files
+	}
+
+	// BuildTriageScript prints "----- <path>" ahead of each file it dumps
+	var files []string
+	for line := range strings.SplitSeq(sections[stageSource].Output, "\n") {
+		if p, ok := strings.CutPrefix(strings.TrimSpace(line), "----- "); ok {
+			if p = strings.TrimPrefix(strings.TrimSpace(p), "/workspace/"); p != "" {
+				files = append(files, p)
+			}
+		}
+	}
+	return files
+}
+
+// the files that actually came back with contents
+func readable(sources []Sourced) []Sourced {
+	var out []Sourced
+	for _, s := range sources {
+		if !s.Missing && !s.TooLarge && strings.TrimSpace(s.Contents) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (r *Runner) strategies() []Strategy {
+	if len(r.Strategies) > 0 {
+		return r.Strategies
+	}
+	return DefaultStrategies
+}
+
+// stamp the outcome and persist it one last time
+func (r *Runner) finish(ctx context.Context, outcome Outcome, status RemediationStatus, err error) Outcome {
+	now := time.Now().UTC()
+	outcome.FinishedAt = &now
+	outcome.Status = status
+	if err != nil {
+		outcome.Error = err.Error()
+	}
+
+	r.save(ctx, outcome)
+	return outcome
+}
+
+// best effort, like the worker's journal: losing durability must not lose a
+// candidate an engineer is about to be shown
+func (r *Runner) save(ctx context.Context, outcome Outcome) {
+	if r.Store == nil {
+		return
+	}
+
+	// its own context: an outcome that finished as the job timed out is still
+	// worth writing down
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeTimeout)
+	defer cancel()
+
+	if err := r.Store.Save(saveCtx, outcome); err != nil {
+		log.Printf("Remediation: could not persist %s: %v", outcome.InvestigationID, err)
+	}
+}
+
+func fallback(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n... (truncated)"
+}
