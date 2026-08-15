@@ -56,7 +56,7 @@ var (
 	NoArgsSchema = map[string]any{"type": "object"}
 )
 
-// Server is a running fake MCP server.
+// a running fake MCP server
 type Server struct {
 	URL string
 
@@ -65,7 +65,7 @@ type Server struct {
 	calls   []Call
 }
 
-// Call records one tool invocation the server received.
+// one tool invocation the server received
 type Call struct {
 	Tool string
 	Args map[string]any
@@ -184,7 +184,7 @@ func (s *Server) Header(key string) string {
 	return s.headers.Get(key)
 }
 
-// Calls returns every tool invocation received, in order.
+// every tool invocation received, in order
 func (s *Server) Calls() []Call {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -207,12 +207,9 @@ func TestBuildTriageScriptBoundsHistoryButFetchesTheCommit(t *testing.T) {
 		t.Errorf("expected a bounded clone at depth %d", CloneDepth)
 	}
 
-	// The implicated commit is very often outside that budget — the seeded
-	// checkout culprit is 67 commits back — so the clone alone is not enough.
-	//
-	// It cannot be fetched by name here, though: '0c6f0ae' is abbreviated, and
-	// a server will not resolve a short object name in a fetch. Deepening is
-	// the only route, and it is conditional so the usual case pays nothing.
+	// the implicated commit is often outside the clone budget, and an
+	// abbreviated SHA cannot be fetched by name, so deepening is the only
+	// route; conditional, so the usual case pays nothing
 	if !strings.Contains(script, "--deepen") {
 		t.Errorf("nothing reaches a commit past the clone depth:\n%s", script)
 	}
@@ -237,9 +234,8 @@ func TestFetchCommitToleratesFailure(t *testing.T) {
 }
 
 func TestCloneIsSelfContained(t *testing.T) {
-	// a blobless clone resolves file contents lazily, which would mean the
-	// container needs the network for its whole life and could never have it
-	// taken away before model-written code runs
+	// a blobless clone resolves contents lazily, so the container would need the
+	// network for its whole life
 	script := BuildTriageScript(checkoutRepo(), "https://github.com/o/r.git", "0c6f0ae")
 	if strings.Contains(script, "--filter=blob:none") {
 		t.Error("a blobless clone needs the network throughout the run")

@@ -14,7 +14,7 @@ import (
 // is small; it exists to bound a process that runs for days, not to be a cache.
 const defaultCapacity = 200
 
-// Status is where an investigation has got to.
+// where an investigation has got to
 type Status string
 
 const (
@@ -26,7 +26,7 @@ const (
 	StatusRetrying Status = "retrying"
 )
 
-// Record is one investigation, as returned by GET /agent/:id.
+// one investigation, as returned by GET /agent/:id
 type Record struct {
 	InvestigationID string       `json:"investigation_id"`
 	IncidentID      string       `json:"incident_id"`
@@ -39,17 +39,9 @@ type Record struct {
 	FinishedAt      *time.Time   `json:"finished_at,omitempty"`
 }
 
-// verdicts keyed by investigation id: a bounded in-memory map in front of an
-// optional journal.
-//
-// The map is the fast path and the source of truth for a running process. The
-// journal is what makes a verdict outlive that process — a restart, an evicted
-// record, or a second consumer on the same queue all fall back to it.
-//
-// With no journal the behaviour is exactly the in-memory one: verdicts die with
-// the process. With one, every write is mirrored and every miss is a read
-// through. Journal failures are logged and swallowed, never returned: losing
-// durability must not cost an investigation.
+// verdicts by investigation id: a bounded map for a running process, in front
+// of an optional journal that outlives it. Failures there are swallowed, since
+// losing durability must not cost an investigation.
 type Store struct {
 	mu       sync.RWMutex
 	byID     map[string]*Record
@@ -106,7 +98,7 @@ func (s *Store) recall(investigationID string) (Record, bool) {
 	return rec, found
 }
 
-// Start records an investigation as running.
+// records an investigation as running
 func (s *Store) Start(a queue.Assignment) {
 	s.put(&Record{
 		InvestigationID: a.InvestigationID,
@@ -118,7 +110,7 @@ func (s *Store) Start(a queue.Assignment) {
 	})
 }
 
-// Finish records the outcome, whether or not the run reached an answer.
+// the outcome, whether or not the run reached an answer
 func (s *Store) Finish(a queue.Assignment, res agent.Result, runErr error) {
 	s.mu.Lock()
 
@@ -150,9 +142,8 @@ func (s *Store) Finish(a queue.Assignment, res agent.Result, runErr error) {
 	s.mirror(snapshot)
 }
 
-// Retry records an attempt whose message was left on the queue. The record is
-// kept so a poller can see why nothing came back, but Seen reports false for
-// it: the whole point is that the next delivery investigates again.
+// an attempt whose message was left on the queue, kept so a poller can see why
+// nothing came back; Seen reports false, since the next delivery must retry
 func (s *Store) Retry(a queue.Assignment, reason string) {
 	now := time.Now().UTC()
 	s.put(&Record{
@@ -166,7 +157,7 @@ func (s *Store) Retry(a queue.Assignment, reason string) {
 	})
 }
 
-// Fail records an investigation that never started, e.g. a message that could
+// an investigation that never started, e.g. a message that could
 // not be parsed or one given up on after too many deliveries.
 func (s *Store) Fail(a queue.Assignment, reason string) {
 	now := time.Now().UTC()
@@ -189,11 +180,8 @@ func (s *Store) Get(investigationID string) (Record, bool) {
 	return rec, found
 }
 
-// get, plus whether this process is the one holding the record.
-//
-// A record in the map is one this process started or finished itself. One that
-// came back from the journal alone may belong to a process that has since
-// exited, which is a distinction Seen depends on.
+// get, plus whether this process holds the record: one from the journal alone
+// may belong to a process that has since exited, which Seen depends on
 func (s *Store) get(investigationID string) (rec Record, found, live bool) {
 	s.mu.RLock()
 	held, ok := s.byID[investigationID]
@@ -208,24 +196,9 @@ func (s *Store) get(investigationID string) (rec Record, found, live bool) {
 	return rec, found, false
 }
 
-// whether this investigation has already been paid for, so a redelivery is not
-// investigated twice.
-//
-// Two kinds of record do not count, both because the work still has to happen:
-// a retrying one, which exists precisely to say so, and a running one this
-// process is not holding. The second is the crash case — the process that
-// started it exited without ever writing a verdict, so nothing is going to
-// finish it, and the redelivery in hand is the retry SQS owes us. Calling that
-// "seen" acknowledges the message and loses the incident.
-//
-// The cost is that two processes polling one queue can both investigate the
-// same incident if the first one's visibility heartbeat fails. That is rare and
-// already logged, it wastes a run rather than corrupting anything, and it is
-// much the better trade: dropping work silently is the one thing this must not
-// do.
-//
-// With a journal this holds across restarts. Without one it is per-process, and
-// a message redelivered after a restart is investigated again.
+// whether this investigation was already paid for, so a redelivery is not run
+// twice. Neither a retrying record nor a running one this process does not hold
+// counts: that is the crash case, and calling it seen loses the incident.
 func (s *Store) Seen(investigationID string) bool {
 	rec, found, live := s.get(investigationID)
 	switch {

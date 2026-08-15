@@ -14,7 +14,7 @@ const (
 	DefaultCollectionStoreTableName = "langchain_pg_collection"
 )
 
-// ErrInvalidOptions is returned when the options given are invalid.
+// the options given are invalid
 var ErrInvalidOptions = errors.New("invalid options")
 
 // enables modification of client

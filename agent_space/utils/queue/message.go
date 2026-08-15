@@ -1,6 +1,5 @@
-// Package queue receives investigation assignments from SQS. It knows nothing
-// about the agent: it decodes envelopes and hands back messages, so the worker
-// can be tested without AWS and the AWS client without an LLM.
+// Package queue receives assignments from SQS and knows nothing about the
+// agent, so the worker tests without AWS and the client without an LLM.
 package queue
 
 import (
@@ -19,11 +18,8 @@ const AssignmentType = "agent.assignment.v1"
 // so the worker deletes it instead of letting the queue retry into a DLQ
 var ErrPermanent = errors.New("queue: message cannot be processed by retrying")
 
-// the assignment envelope, carried as JSON in the SQS message body.
-//
-// Note what is NOT here: any description of the incident. The producer sends
-// identifiers and expects the consumer to fetch the prose itself, keyed by
-// IncidentID and ContextVersion.
+// the assignment envelope, JSON in the SQS body. No description of the incident
+// is here: the producer sends identifiers and the consumer fetches the prose.
 type Assignment struct {
 	SchemaVersion   string    `json:"schema_version"`
 	MessageID       string    `json:"message_id"`
@@ -55,9 +51,8 @@ type Message struct {
 	MessageAttributes map[string]string
 }
 
-// how many times SQS has handed this message out, counting this delivery.
-// Absent or unparseable reads as 1: a missing count must not look like a
-// message that has already exhausted its attempts.
+// how many times SQS has handed this out, counting this delivery; absent reads
+// as 1, so a missing count cannot look like exhausted attempts
 func (m Message) ReceiveCount() int {
 	n, err := strconv.Atoi(m.Attributes["ApproximateReceiveCount"])
 	if err != nil || n < 1 {
@@ -74,9 +69,8 @@ func (m Message) DeduplicationKey() string {
 	return m.MessageID
 }
 
-// decode and validate the envelope. Every failure here is permanent: a body
-// that is not JSON, or names another message type, will not become valid on
-// the next delivery.
+// decode and validate the envelope; every failure here is permanent, since a
+// bad body will not become valid on the next delivery
 func ParseAssignment(body string) (Assignment, error) {
 	var a Assignment
 	if err := json.Unmarshal([]byte(body), &a); err != nil {

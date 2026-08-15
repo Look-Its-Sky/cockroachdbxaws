@@ -1,6 +1,5 @@
-// Package incident turns an assignment envelope into the prose an agent run
-// needs. The queue sends identifiers only, so the description has to be
-// fetched from the database the producer wrote it to.
+// Package incident turns an assignment envelope into the prose a run needs: the
+// queue sends identifiers only, so the description is fetched from the database.
 package incident
 
 import (
@@ -16,9 +15,8 @@ import (
 	"agent_space/utils/queue"
 )
 
-// no row for this incident at this context_version. Transient by nature: the
-// producer may enqueue the assignment before committing the context, so the
-// worker leaves the message for redelivery rather than failing the run.
+// no row at this context_version, transient by nature: the producer may enqueue
+// before committing, so the worker leaves the message for redelivery
 var ErrNotFound = errors.New("incident: no context row for this incident and version")
 
 // what the producer recorded about an incident, one row of incident_context
@@ -33,16 +31,15 @@ type Context struct {
 	DetectedAt     time.Time
 }
 
-// Resolver reads incident context out of CockroachDB.
+// reads incident context out of CockroachDB
 type Resolver struct {
 	Pool *pgxpool.Pool
 }
 
 func NewResolver(pool *pgxpool.Pool) *Resolver { return &Resolver{Pool: pool} }
 
-// the row the assignment points at. Keyed by both id and version: the producer
-// revises context in place, and an assignment names the version it was raised
-// against, so an older message must not pick up newer analysis.
+// the row the assignment points at, keyed by id and version so an older message
+// does not pick up analysis revised in place since
 func (r *Resolver) Resolve(ctx context.Context, a queue.Assignment) (Context, error) {
 	if r == nil || r.Pool == nil {
 		return Context{}, errors.New("incident: no database pool configured")
@@ -69,13 +66,9 @@ func (r *Resolver) Resolve(ctx context.Context, a queue.Assignment) (Context, er
 	return c, nil
 }
 
-// Latest returns the newest context recorded for an incident, whatever version
-// that is.
-//
-// Resolve is keyed by version because an assignment names the version it was
-// raised against. This is for the other direction: a person asking the API to
-// remediate an investigation that finished hours ago, where the version the
-// message carried is long gone and the current view is the right one.
+// the newest context for an incident, whatever version. Unlike Resolve, which
+// is keyed by the version an assignment named: this is for a person remediating
+// a run that finished hours ago, where the current view is the right one.
 func (r *Resolver) Latest(ctx context.Context, incidentID string) (Context, error) {
 	if r == nil || r.Pool == nil {
 		return Context{}, errors.New("incident: no database pool configured")
@@ -104,11 +97,8 @@ func (r *Resolver) Latest(ctx context.Context, incidentID string) (Context, erro
 	return c, nil
 }
 
-// render the question for agent.Runner.Run.
-//
-// This states the facts and stops. What to do with them — find the commit,
-// choose ROLLBACK or HOTFIX, cite past incidents — is the Runner's system
-// prompt's job, and repeating it here would mean two places to keep in step.
+// the question for agent.Runner.Run, which states the facts and stops; what to
+// do with them is the system prompt's job, and saying it twice means two to keep
 func BuildQuestion(a queue.Assignment, c Context) string {
 	var b strings.Builder
 

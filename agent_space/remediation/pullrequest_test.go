@@ -16,10 +16,8 @@ func apiError(status int, header http.Header) error {
 	}
 }
 
-// The raw message names no permission and no place to fix it, and the
-// repository's own permissions block reports the account's access rather than
-// the token's — so an engineer who clicks the button gets sent to read our
-// source instead of their token settings.
+// the raw message names no permission and the repo's permissions block reports
+// the account's access, so it sends people to our source, not their settings
 func TestOpenTranslatesAForbiddenIntoSomethingActionable(t *testing.T) {
 	header := http.Header{}
 	header.Set("X-Accepted-GitHub-Permissions", "contents=write")

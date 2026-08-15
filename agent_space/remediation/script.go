@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// Sections are delimited in the container's stdout with these markers. A prefix
-// that no compiler, test runner or coding harness would emit by accident, so a
-// build log mentioning "diff" cannot be mistaken for the diff itself.
+// stage markers in the container's stdout, prefixed so a build log mentioning
+// "diff" cannot be mistaken for the diff itself
 const (
 	sectionBegin = "__SRE_BEGIN__ "
 	sectionEnd   = "__SRE_END__ "
@@ -24,24 +23,21 @@ const (
 	stageDiff    = "diff"
 )
 
-// Section is one stage's output and exit status.
+// one stage's output and exit status
 type Section struct {
 	Stage    string
 	Output   string
 	ExitCode int
-	// Ran is false when the stage was skipped, e.g. a service with no test
+	// false when the stage was skipped, e.g. a service with no test
 	// command. A skipped stage is not a passing one.
 	Ran bool
 }
 
 func (s Section) Passed() bool { return s.Ran && s.ExitCode == 0 }
 
-// BuildScript composes the whole job: clone the repository, let the harness
-// change it, then install, build, test and print the diff.
-//
-// Every stage is wrapped in markers and its exit code recorded, and the script
-// never aborts early — a failed build still has to reach the diff stage, since
-// a candidate that does not compile is worth showing as such rather than losing.
+// the whole job: clone, let the harness change it, then install, build, test
+// and print the diff. Never aborts early, so a failed build still reaches the
+// diff stage and a candidate that does not compile is shown rather than lost.
 func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 	var b strings.Builder
 
@@ -60,15 +56,9 @@ func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 
 	stage(&b, stageHarness, harnessCommand)
 
-	// Taken immediately after the harness and before anything is installed or
-	// built, so the diff is what the model changed and nothing else. Run last
-	// it would sweep in whatever `npm ci` and the build left lying around.
-	//
-	// From the repository root, so a change outside the service directory is
-	// still captured; staged first, because `git diff` alone does not show a
-	// file the model created, and creating one is something ApplyCommand
-	// explicitly allows. Paths the repository ignores stay ignored, which is
-	// the right answer for node_modules and the wrong one nowhere that matters.
+	// taken before anything is installed, so the diff is what the model changed
+	// and not what the build left lying around. From the repository root and
+	// staged first, since `git diff` alone does not show a file it created.
 	stage(&b, stageDiff, "git -C /workspace add -A && git -C /workspace --no-pager diff --cached")
 
 	stageIf(&b, stageSetup, repo.SetupCommand)
@@ -78,65 +68,36 @@ func BuildScript(repo Repository, cloneURL, sha, harnessCommand string) string {
 	return b.String()
 }
 
-// how much history a sandbox gets. Enough to read recent deploys and to blame
-// a change in context, without paying for years of a monorepo on every
-// candidate. At this repository's rate — dependabot lands most days — 100
-// commits is roughly a month.
-//
-// This is a context budget, not a correctness dependency: the commit an
-// incident implicates is fetched explicitly by fetchCommitCommand, so a culprit
-// older than the depth is still readable.
+// how much history a sandbox gets, roughly a month at this repo's rate. A
+// context budget rather than a correctness one: fetchCommitCommand reaches an
+// implicated commit explicitly, so an older culprit is still readable.
 const CloneDepth = 100
 
-// the whole clone stage: clone, reach the implicated commit, then report
-// whether there is actually a checkout to work with.
-//
-// That last check is the point of this existing at all. The fetch fallbacks
-// deliberately end in `|| echo`, so a commit that cannot be reached is a
-// finding rather than a dead run — but a stage's exit code is its last
-// command's, so without a final test a *total* clone failure still reports
-// success. It did exactly that: node:22-alpine ships no git, and the clone
-// stage came back exit 0 with "git: not found" as its output, which
-// Runner.candidate reads as a good checkout.
+// clone, reach the implicated commit, then check there is a checkout at all.
+// That last test is the point: the fallbacks end in `|| echo` and a stage exits
+// with its last command, so node:22-alpine reported success with no git.
 func cloneStageCommand(repo Repository, cloneURL, sha string) string {
 	return cloneCommand(repo, cloneURL) + "\n" +
 		fetchCommitCommand(sha) + "\n" +
 		"[ -d /workspace/.git ]"
 }
 
-// a bounded clone of one branch.
-//
-// Not --filter=blob:none: a blobless clone is smaller up front but resolves
-// file contents lazily, so it needs the network for the whole life of the
-// container and every `git show` of an old commit is a round trip. A depth
-// clone is self-contained once it finishes, which is what lets the network be
-// taken away before model-written code runs.
+// a bounded clone of one branch. Not --filter=blob:none, which resolves blobs
+// lazily and so needs the network for the container's whole life; a depth clone
+// is self-contained, which is what lets the network be taken away.
 func cloneCommand(repo Repository, cloneURL string) string {
 	return fmt.Sprintf(
 		"git clone --depth %d --single-branch --branch %s %s /workspace",
 		CloneDepth, shellQuote(repo.DefaultBranch), shellQuote(cloneURL))
 }
 
-// how much further back to reach when the implicated commit is abbreviated and
-// the depth clone did not already contain it. Five times CloneDepth: enough to
-// cover months of this repository, and still far short of cloning it whole.
+// how much further to reach for an abbreviated commit the clone missed; five
+// times CloneDepth, months of this repo and still far short of the whole thing
 const deepenBy = 5 * CloneDepth
 
-// guarantee one commit is present regardless of the clone depth.
-//
-// A **full** object name can be fetched directly, so a culprit 500 commits back
-// costs one extra object rather than 500. An abbreviated one cannot:
-// `git fetch origin 0c6f0ae` fails with "couldn't find remote ref", because the
-// protocol has no way to resolve a short name on the server. Verified against
-// the fork on 2026-08-12, and it matters because the deploys table stores
-// seven characters — so this is the common case, not the exotic one.
-//
-// For a short SHA the fallback is to deepen, and only when the clone did not
-// already reach it, which for the seeded culprits it does.
-//
-// Deliberately tolerant of failure throughout: a commit that cannot be reached
-// is a finding for triage to report, not a reason to abandon the run before it
-// has looked at anything.
+// guarantee one commit is present regardless of clone depth, deepening when the
+// SHA is abbreviated and cannot be fetched by name. Tolerant of failure: an
+// unreachable commit is a finding for triage, not a dead run.
 func fetchCommitCommand(sha string) string {
 	quoted := shellQuote(sha)
 
@@ -181,10 +142,8 @@ func stageIf(b *strings.Builder, name, command string) {
 	stage(b, name, command)
 }
 
-// ParseSections pulls the delimited stages back out of a container's output.
-//
-// Anything printed outside a marked stage is ignored: shells are chatty, and a
-// warning on stderr must not end up inside a diff.
+// pulls the delimited stages back out of a container's output, ignoring
+// anything outside a marker so a chatty shell cannot end up inside a diff
 func ParseSections(output string) map[string]Section {
 	sections := make(map[string]Section)
 

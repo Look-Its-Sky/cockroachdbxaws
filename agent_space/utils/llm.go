@@ -38,12 +38,12 @@ func warn(key, format string, args ...any) {
 	}
 }
 
-// SelfHosted reports whether chat is pointed at a non-OpenRouter endpoint.
+// whether chat is pointed at a non-OpenRouter endpoint
 func SelfHosted() bool {
 	return os.Getenv("OPENAI_BASE_URL") != ""
 }
 
-// BaseURL returns the endpoint chat completions are sent to.
+// the endpoint chat completions are sent to
 func BaseURL() string {
 	return EnvOr("OPENAI_BASE_URL", openRouterBaseURL)
 }
@@ -64,7 +64,7 @@ func EnvBool(key string) bool {
 	return err == nil && v
 }
 
-// EnvOr returns the environment variable named by key, or fallback if unset.
+// the environment variable named by key, or fallback if unset
 func EnvOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -111,7 +111,7 @@ func ChatModel() string {
 	return defaultChatModel
 }
 
-// EmbeddingModel returns the embedding model name.
+// the embedding model name
 func EmbeddingModel() string {
 	if model := os.Getenv("OPENROUTER_EMBEDDING_MODEL"); model != "" {
 		return model
@@ -138,7 +138,7 @@ func newOpenAICompatibleClient(baseURL string, opts ...openai.Option) (*openai.L
 	}, opts...)...)
 }
 
-// GetLLM initializes and returns the chat model backing the agent.
+// the chat model backing the agent
 func GetLLM() (llms.Model, error) {
 	return newOpenAICompatibleClient(
 		BaseURL(),
@@ -184,14 +184,14 @@ func VectorDimensions() int {
 	return dims
 }
 
-// GetEmbedder initializes and returns the Embedder used by the vector store.
+// the embedder used by the vector store
 func GetEmbedder() (embeddings.Embedder, error) {
 	client, err := newOpenAICompatibleClient(
 		EmbeddingBaseURL(),
 		// irrelevant to embedding calls but openai.New requires a chat model; use the embedding one so no placeholder leaks
 		openai.WithModel(EmbeddingModel()),
 		openai.WithEmbeddingModel(EmbeddingModel()),
-		// Zero is passed through deliberately: langchaingo drops the field.
+		// zero is passed through deliberately: langchaingo drops the field
 		openai.WithEmbeddingDimensions(EmbeddingDimensions()),
 	)
 	if err != nil {

@@ -12,14 +12,9 @@ import (
 	"agent_space/utils"
 )
 
-// The rest of the suite needs no credentials and no network. This one talks to
-// a real cluster, so it is opt-in:
+// talks to a real cluster, so it is opt-in and writes under a synthetic id:
 //
 //	JOURNAL_LIVE_TEST=1 go test ./worker/ -run Live -v
-//
-// It creates the investigations table if it is missing — the same call the
-// server makes at boot — writes one row under an obviously synthetic id, reads
-// it back, and deletes it.
 func TestLiveJournalRoundTrip(t *testing.T) {
 	if os.Getenv("JOURNAL_LIVE_TEST") == "" {
 		t.Skip("set JOURNAL_LIVE_TEST=1 to run against DATABASE_URL")
@@ -98,7 +93,7 @@ func TestLiveJournalRoundTrip(t *testing.T) {
 		t.Errorf("finished_at = %v, want %v", got.FinishedAt, finished)
 	}
 
-	// Save is an upsert: a second write replaces rather than duplicating
+	// an upsert: a second write replaces rather than duplicating
 	want.Status = StatusFailed
 	if err := journal.Save(ctx, want); err != nil {
 		t.Fatalf("second Save: %v", err)
@@ -126,11 +121,8 @@ func TestLiveJournalRoundTrip(t *testing.T) {
 	}
 }
 
-// The age gate is the whole reason AbandonStale is safe to run while another
-// process is polling the same queue, so it is the part worth proving against a
-// real database rather than a fake.
-//
-//	JOURNAL_LIVE_TEST=1 go test ./worker/ -run Live -v
+// the age gate is why AbandonStale is safe beside another process polling the
+// same queue, so it is the part worth proving against a real database
 func TestLiveAbandonStaleOnlyReclaimsOldRuns(t *testing.T) {
 	if os.Getenv("JOURNAL_LIVE_TEST") == "" {
 		t.Skip("set JOURNAL_LIVE_TEST=1 to run against DATABASE_URL")

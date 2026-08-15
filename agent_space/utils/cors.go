@@ -12,13 +12,9 @@ import (
 // does not change while the server is up.
 const preflightMaxAge = "86400"
 
-// CORS lets a frontend served from another origin call this API.
-//
-// A Vite dev server on :5173 is a different origin from an API on :8080, so
-// without this every request from it fails before it is sent. CORS_ORIGINS
-// narrows it to a list; unset means any origin, which is right for a service
-// that is unauthenticated and not exposed publicly, and wrong the moment either
-// of those changes.
+// lets a frontend on another origin call this API, since :5173 and :8080 are
+// different origins. CORS_ORIGINS narrows it; unset means any, which is wrong
+// the moment this is authenticated or exposed.
 func CORS() gin.HandlerFunc {
 	allowed := splitList(EnvOr("CORS_ORIGINS", ""))
 

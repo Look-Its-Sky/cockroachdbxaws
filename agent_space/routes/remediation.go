@@ -29,7 +29,7 @@ const readTimeout = 15 * time.Second
 // embedding round trip to a provider rather than a query.
 const indexTimeout = 60 * time.Second
 
-// Repositories lists the service-to-repository mapping, for the UI's header and
+// the service-to-repository mapping, for the UI's header and
 // for showing what "verified" means per service.
 func Repositories(c *gin.Context) {
 	if Repos == nil {
@@ -60,7 +60,7 @@ func Repositories(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"count": len(out), "repositories": out})
 }
 
-// Remediations lists recent remediation runs, newest first. Candidates are
+// recent remediation runs, newest first. Candidates are
 // deliberately not included: a diff per candidate turns a list into megabytes.
 func Remediations(c *gin.Context) {
 	if Solutions == nil {
@@ -81,7 +81,7 @@ func Remediations(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"count": len(outcomes), "remediations": outcomes})
 }
 
-// RemediationFor returns the triage finding and the ranked candidates for one
+// the triage finding and the ranked candidates for one
 // investigation. This is what the picker in the UI is built on.
 func RemediationFor(c *gin.Context) {
 	if Solutions == nil {
@@ -107,9 +107,8 @@ func RemediationFor(c *gin.Context) {
 	c.JSON(http.StatusOK, outcome)
 }
 
-// StartRemediation proposes fixes for an investigation that already has a
-// verdict. The queue path does this automatically; this is the demo's button,
-// and the way to retry one that was dropped because the pool was full.
+// proposes fixes for an investigation that already has a verdict; the queue
+// does this automatically, so this is the button and the retry
 func StartRemediation(c *gin.Context) {
 	if Remediation == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": remediationUnavailable})
@@ -162,11 +161,8 @@ func StartRemediation(c *gin.Context) {
 	})
 }
 
-// the prose the fix is written against.
-//
-// The stored context is preferred and the verdict is the fallback: an incident
-// row that has since been deleted must not stop a candidate being proposed for
-// an investigation that plainly succeeded.
+// the prose the fix is written against, preferring stored context and falling
+// back to the verdict, so a deleted incident row still allows a candidate
 func summaryFor(c *gin.Context, record worker.Record) string {
 	if Incidents == nil || record.IncidentID == "" {
 		return record.Result.Answer
@@ -187,7 +183,7 @@ func summaryFor(c *gin.Context, record worker.Record) string {
 	}, inc)
 }
 
-// OpenPullRequest is the engineer picking a candidate. Picking is what opens
+// the engineer picking a candidate; picking is what opens
 // the draft; nothing before this point touches the repository.
 func OpenPullRequest(c *gin.Context) {
 	if Solutions == nil {
@@ -246,9 +242,8 @@ func OpenPullRequest(c *gin.Context) {
 		return
 	}
 
-	// the URL is what the engineer is about to be sent to, so a failure to
-	// record it is reported rather than swallowed: an unrecorded PR is one
-	// nobody can find again from the incident
+	// reported rather than swallowed: an unrecorded PR is one nobody can find
+	// again from the incident
 	if err := Solutions.MarkOpened(ctx, candidate.ID, url); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"candidate_id": candidate.ID,
@@ -265,14 +260,9 @@ func OpenPullRequest(c *gin.Context) {
 	})
 }
 
-// DecisionRequest is what the frontend posts when an engineer commits to a
-// choice.
-//
-// Every field is optional on its own. What is deliberately absent is anything
-// factual: the service, the strategy, and above all what was verified are read
-// back from the stored run. This text ends up in a document that shapes future
-// incidents, so a caller must not be able to assert that something passed tests
-// it never ran.
+// what the frontend posts when an engineer commits to a choice. Every field is
+// optional, and nothing factual is here: what was verified is read from the
+// stored run, so a caller cannot claim tests passed that never ran.
 type DecisionRequest struct {
 	ChosenCandidateID string             `json:"chosen_candidate_id"`
 	Rejections        []RejectionRequest `json:"rejections" binding:"omitempty,dive"`
@@ -288,12 +278,8 @@ type RejectionRequest struct {
 	Reason      string `json:"reason" binding:"max=1000"`
 }
 
-// RecordDecision stores an engineer's verdict on the proposed fixes and puts it
-// where the next similar incident will find it.
-//
-// This is the only point in the pipeline where human judgement is captured.
-// Everything before it records what a model produced or what a container
-// proved; without this the reasoning behind a pick is lost when the page closes.
+// stores an engineer's verdict and puts it where the next similar incident will
+// find it; the only point in the pipeline where human judgement is captured
 func RecordDecision(c *gin.Context) {
 	if Solutions == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": solutionsUnavailable})
@@ -382,12 +368,8 @@ func RecordDecision(c *gin.Context) {
 	c.JSON(http.StatusCreated, body)
 }
 
-// put the decision in the index, and drop any it replaced.
-//
-// Deliberately not on the request's context: an embedding call is an external
-// round trip, and a client that navigates away must not leave a decision stored
-// but unrecallable. A failure here is reported rather than swallowed, because
-// an unindexed decision is one the system will never learn from.
+// indexes the decision and drops any it replaced, off the request's context so
+// a client navigating away cannot leave one stored but unrecallable
 func indexDecision(d remediation.Decision, superseded []string) (indexed bool, warning string) {
 	if PrecedentIndex == nil {
 		return false, "recorded, but there is no decision index configured, so it will not be recalled"
@@ -437,11 +419,8 @@ func indexedNote(indexed bool) string {
 	return "NOT indexed"
 }
 
-// the prose the decision is written against, resolved server-side.
-//
-// Empty is acceptable: an incident row that has since been deleted must not
-// stop a decision being recorded, and the triage evidence still carries the
-// cause.
+// the prose the decision is written against, resolved server-side; empty is
+// acceptable, since triage evidence still carries the cause
 func incidentProseFor(c *gin.Context, o remediation.Outcome) string {
 	if Incidents == nil || o.IncidentID == "" {
 		return ""

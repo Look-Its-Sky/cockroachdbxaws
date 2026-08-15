@@ -31,14 +31,13 @@ type Config struct {
 	VisibilityTimeout time.Duration
 	WaitTime          time.Duration
 	RunTimeout        time.Duration
-	// MaxAttempts is the delivery count at which a message is given up on,
+	// the delivery count at which a message is given up on,
 	// recorded as failed and deleted rather than left to redeliver forever.
 	MaxAttempts int
 }
 
-// Normalised on the way out: the worker reads these values directly, and a
-// MaxAttempts of 0 read literally would give up on every message before
-// running it.
+// normalised on the way out, since the worker reads these directly and a
+// MaxAttempts of 0 would give up on every message before running it
 func ConfigFromEnv() Config {
 	return Config{
 		QueueURL:          utils.EnvOr("SQS_QUEUE_URL", ""),
@@ -51,18 +50,15 @@ func ConfigFromEnv() Config {
 	}.normalised()
 }
 
-// Configured reports whether there is a queue to poll at all.
+// whether there is a queue to poll at all
 func (c Config) Configured() bool { return c.QueueURL != "" }
 
-// clamp the values SQS itself constrains, and settle the one pair that can
-// contradict each other, so a bad .env is corrected at boot rather than
-// rejected on every receive
+// clamp what SQS constrains and settle the pair that can contradict, so a bad
+// .env is corrected at boot rather than rejected on every receive
 func (c Config) normalised() Config {
-	// Moving to real SQS means changing the queue URL and *deleting* the
-	// endpoint override, which is easy to half-do: the override wins silently
-	// and every call goes to an emulator that is not listening, which reads as a
-	// queue fault rather than a configuration one. A queue URL on AWS's own
-	// domain settles it — that is not an address LocalStack can serve.
+	// moving to real SQS means deleting the endpoint override too, which is
+	// easy to half-do: the override wins silently and every call goes to an
+	// emulator that is not listening. A URL on AWS's own domain settles it.
 	if c.Endpoint != "" && isAWSQueue(c.QueueURL) {
 		log.Printf("queue: SQS_QUEUE_URL is an AWS queue, so AWS_ENDPOINT_URL=%q is ignored", c.Endpoint)
 		c.Endpoint = ""
@@ -86,12 +82,9 @@ func (c Config) normalised() Config {
 	return c
 }
 
-// whether a queue URL addresses AWS itself rather than an emulator.
-//
-// Matched on the parsed host and on a leading dot, so a hostname that merely
-// contains the string — evil-amazonaws.com — is not mistaken for one. China
-// needs saying separately: its hosts end .amazonaws.com.cn, which is not a
-// suffix of .amazonaws.com.
+// whether a queue URL addresses AWS rather than an emulator. Matched on the
+// parsed host with a leading dot, so evil-amazonaws.com does not pass; China
+// needs saying separately, since its hosts end .amazonaws.com.cn.
 func isAWSQueue(queueURL string) bool {
 	u, err := url.Parse(queueURL)
 	if err != nil {

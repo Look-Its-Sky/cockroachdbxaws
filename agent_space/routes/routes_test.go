@@ -11,9 +11,8 @@ import (
 	"agent_space/utils"
 )
 
-// the route set as main.go registers it. Gin panics on a conflicting pattern at
-// registration rather than at request time, so a bad combination is a crash at
-// boot — which is exactly the sort of thing that is found during a demo.
+// the route set as main.go registers it; Gin panics on a conflicting pattern at
+// registration, so a bad combination is a crash at boot
 func router() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
@@ -92,9 +91,8 @@ func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
 	}
 }
 
-// The binding tags carry real validation, and two of them are easy to get
-// subtly wrong: without `dive` a rejection with no candidate_id is never
-// checked, and the caps are what stop unbounded text reaching a model prompt.
+// the binding tags carry real validation: without `dive` a rejection with no
+// candidate_id is never checked, and the caps stop unbounded text reaching a prompt
 func TestDecisionRequestBinding(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

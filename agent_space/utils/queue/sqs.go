@@ -22,7 +22,7 @@ type Receiver interface {
 	ExtendVisibility(ctx context.Context, receiptHandle string, seconds int32) error
 }
 
-// Client is the SQS-backed Receiver.
+// the SQS-backed Receiver
 type Client struct {
 	sqs *sqs.Client
 	cfg Config
@@ -30,9 +30,8 @@ type Client struct {
 
 var _ Receiver = (*Client)(nil)
 
-// build a client from the standard AWS credential chain. Config.Endpoint, when
-// set, repoints it at LocalStack; nothing else in this file knows the
-// difference, which is the point — the same code path runs against real SQS.
+// a client from the standard AWS credential chain; Config.Endpoint repoints it
+// at LocalStack, and nothing else here knows the difference
 func New(ctx context.Context, cfg Config) (*Client, error) {
 	if !cfg.Configured() {
 		return nil, fmt.Errorf("queue: SQS_QUEUE_URL is not set")

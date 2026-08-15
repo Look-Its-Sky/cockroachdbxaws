@@ -123,9 +123,8 @@ func TestDecisionDocumentStatesWhatWasVerified(t *testing.T) {
 	}
 }
 
-// The case worth getting right: the agent proposed fixes and a human took none
-// of them, then fixed it themselves. That is a demonstration, not a rejection,
-// and it is the most useful thing this table can hold.
+// the case worth getting right: nobody took a proposed fix and the engineer
+// wrote their own, which is a demonstration rather than a rejection
 func TestDecisionRecordsTheFixAnEngineerWroteInstead(t *testing.T) {
 	o := decidableOutcome()
 

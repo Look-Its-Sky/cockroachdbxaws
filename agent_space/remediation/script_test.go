@@ -116,10 +116,8 @@ func TestFetchCommitCommandHandlesShortAndFullSHAs(t *testing.T) {
 	}
 }
 
-// A stage's exit code is its last command's, and the fetch fallbacks all end in
-// `|| echo`. Without a final test the clone stage reports success even when git
-// is absent entirely — which is what node:22-alpine did, and what
-// Runner.candidate reads as a good checkout before proceeding on nothing.
+// a stage's exit code is its last command's and the fallbacks end in `|| echo`,
+// so without a final test the clone reports success with no git at all
 func TestCloneStageReportsWhetherThereIsACheckout(t *testing.T) {
 	for _, sha := range []string{"0c6f0ae", "0c6f0ae70920e87405ab44d1e3a160bce1d4e82c"} {
 		got := cloneStageCommand(checkoutRepo(), "https://github.com/o/r.git", sha)

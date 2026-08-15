@@ -11,14 +11,9 @@ import (
 	"agent_space/utils"
 )
 
-// The rest of the suite needs no credentials and no network. This one talks to
-// a real cluster, so it is opt-in:
+// talks to a real cluster, so it is opt-in and writes under synthetic ids:
 //
 //	REMEDIATION_LIVE_TEST=1 go test ./remediation/ -run Live -v
-//
-// It creates the remediations and solutions tables if they are missing — the
-// same call the server makes at boot — writes rows under obviously synthetic
-// ids, and deletes them.
 func liveStore(t *testing.T) (*Solutions, *pgxpool.Pool, context.Context) {
 	t.Helper()
 
@@ -50,10 +45,8 @@ func liveStore(t *testing.T) (*Solutions, *pgxpool.Pool, context.Context) {
 	return solutions, pool, ctx
 }
 
-// A remediation left at "running" by a process that exited has no owner: the
-// pool is per-process and the SQS message was acknowledged long before the
-// handoff, so nothing will ever finish it. Without this it reports "running" to
-// the UI forever, and blocks the retry route as well.
+// a remediation left running by a dead process has no owner, and without this
+// reports "running" to the UI forever and blocks the retry route
 func TestLiveAbandonStaleReclaimsRunningRemediations(t *testing.T) {
 	solutions, pool, ctx := liveStore(t)
 
@@ -96,13 +89,9 @@ func TestLiveAbandonStaleReclaimsRunningRemediations(t *testing.T) {
 		t.Error("a reclaimed remediation should have a finished_at")
 	}
 
-	// Unconditional, but still idempotent: a second sweep must leave a row it
-	// already failed exactly as it was, or every boot would rewrite finished_at
-	// and the record would drift away from when the run actually died.
-	//
-	// Asserted on this row rather than on the returned count, which is global:
-	// a dev server starting a remediation mid-test would make a count assertion
-	// fail for a reason that has nothing to do with idempotency.
+	// unconditional but still idempotent, or every boot rewrites finished_at
+	// and drifts from when the run died. Asserted on this row rather than the
+	// count, which is global and moves if a dev server is running.
 	if _, err := solutions.AbandonStale(ctx); err != nil {
 		t.Fatalf("second AbandonStale: %v", err)
 	}
@@ -137,9 +126,8 @@ func findRecent(t *testing.T, ctx context.Context, s *Solutions, investigationID
 	return Outcome{}
 }
 
-// The decision write is a transaction across two tables, and the parts that
-// matter cannot be unit tested: the candidate statuses moving, a pull request
-// surviving, and a second decision replacing the first.
+// a transaction across two tables, and the parts that matter cannot be unit
+// tested: statuses moving, a PR surviving, a second decision replacing the first
 func TestLiveDecisionRoundTrip(t *testing.T) {
 	solutions, pool, ctx := liveStore(t)
 
@@ -227,9 +215,8 @@ func TestLiveDecisionRoundTrip(t *testing.T) {
 		t.Error("indexed_at is set before anything indexed it")
 	}
 
-	// the picker makes one call and has to be able to tell a decided run from an
-	// undecided one; without this a reload cannot show what was chosen, and
-	// posting again silently supersedes the record
+	// the picker makes one call and has to tell a decided run from an undecided
+	// one, or a reload cannot show what was chosen
 	reloaded, _, err := solutions.Load(ctx, inv)
 	if err != nil {
 		t.Fatalf("Load after deciding: %v", err)
@@ -263,9 +250,8 @@ func TestLiveDecisionRoundTrip(t *testing.T) {
 		}
 	}
 
-	// The list page shows "3 fixes · dealt with" off these two aggregates alone,
-	// so they are what stops the picker's landing page fetching a full set of
-	// diffs per row just to render a count.
+	// the list page renders "3 fixes · dealt with" off these two alone, which is
+	// what stops it fetching a diff per row to show a count
 	listed := findRecent(t, ctx, solutions, inv)
 	if listed.CandidateCount != 3 {
 		t.Errorf("candidate_count = %d, want 3", listed.CandidateCount)

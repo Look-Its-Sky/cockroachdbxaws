@@ -14,14 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// a Sandbox backed by a container CLI.
-//
-// The CLI rather than the Docker SDK: the SDK is a very large dependency for
-// "run one container", the CLI works with podman and nerdctl by changing one
-// string, and every invocation is a command that can be pasted into a terminal
-// when something misbehaves.
+// a Sandbox backed by a container CLI rather than the Docker SDK: podman and
+// nerdctl work by changing one string, and every invocation is pasteable
 type ContainerSandbox struct {
-	// Binary is docker, podman or nerdctl. Defaults to docker.
+	// docker, podman or nerdctl; defaults to docker
 	Binary string
 	// Names every container this process starts, so an orphan is traceable
 	// back to the run that leaked it.
@@ -33,9 +29,8 @@ var _ Sandbox = (*ContainerSandbox)(nil)
 // how long to wait for a forced removal after a timeout
 const removeGrace = 20 * time.Second
 
-// Available reports whether the container runtime can actually be reached.
-// Called at boot, so a missing runtime is a log line rather than a surprise
-// twenty minutes into an incident.
+// whether the runtime can be reached, called at boot so a missing one is a log
+// line rather than a surprise twenty minutes into an incident
 func (s *ContainerSandbox) Available(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -65,9 +60,8 @@ func (s *ContainerSandbox) Run(ctx context.Context, spec Spec) (Run, error) {
 
 	cmd := exec.CommandContext(runCtx, s.binary(), s.args(spec, name)...)
 
-	// Secrets are named on the command line but their values are read from
-	// this process's environment by the CLI, so they never appear in argv
-	// where any other process on the box could read them.
+	// named on the command line but read from this process's environment, so a
+	// value never appears in argv where another process could read it
 	cmd.Env = append(os.Environ(), formatEnv(spec.SecretEnv)...)
 
 	var output bytes.Buffer
@@ -78,10 +72,8 @@ func (s *ContainerSandbox) Run(ctx context.Context, spec Spec) (Run, error) {
 	err := cmd.Run()
 	duration := time.Since(start)
 
-	// A killed CLI does not necessarily stop the container, and --rm only
-	// applies to a container that exits on its own. Remove it unconditionally:
-	// on the happy path this is a no-op, and it is the difference between a
-	// timeout costing one run and a timeout leaking a container per incident.
+	// a killed CLI does not stop the container and --rm only covers a clean
+	// exit, so remove unconditionally or a timeout leaks one per incident
 	s.forceRemove(name)
 
 	run := Run{

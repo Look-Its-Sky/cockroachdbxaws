@@ -46,7 +46,7 @@ func IsSessionFailure(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// Config is everything needed to reach the managed MCP server.
+// everything needed to reach the managed MCP server
 type Config struct {
 	URL       string
 	APIKey    string
@@ -62,7 +62,7 @@ func ConfigFromEnv() Config {
 	}
 }
 
-// Configured reports whether there is enough information to attempt a connection.
+// whether there is enough information to attempt a connection
 func (c Config) Configured() bool {
 	return c.APIKey != "" && c.URL != ""
 }
@@ -166,7 +166,7 @@ func (s *Session) discover(ctx context.Context) error {
 	return nil
 }
 
-// Tools returns every discovered tool, sorted by name.
+// every discovered tool, sorted by name
 func (s *Session) Tools() []*Tool { return s.tools }
 
 // Tool looks up a single tool by its MCP name.
@@ -175,7 +175,7 @@ func (s *Session) Tool(name string) (*Tool, bool) {
 	return t, ok
 }
 
-// Names returns the discovered tool names, for logging.
+// the discovered tool names, for logging
 func (s *Session) Names() []string {
 	names := make([]string, 0, len(s.tools))
 	for _, t := range s.tools {
@@ -187,7 +187,7 @@ func (s *Session) Names() []string {
 // the URL this session talks to; safe to log, it carries no credential
 func (s *Session) Endpoint() string { return s.config.URL }
 
-// ClusterID returns the cluster this session is scoped to, or "" for org-wide.
+// the cluster this session is scoped to, or "" for org-wide
 func (s *Session) ClusterID() string { return s.config.ClusterID }
 
 // Close terminates the MCP session.

@@ -6,9 +6,8 @@ import (
 )
 
 func TestSplitStatementsEmptyStringLiteral(t *testing.T) {
-	// the case that broke scripts/repos.sql: '' is an empty literal, not an
-	// escaped quote, and misreading it leaves the splitter inside a string for
-	// the rest of the file
+	// the case that broke repos.sql: misreading '' as an escaped quote leaves
+	// the splitter inside a string for the rest of the file
 	sql := `UPSERT INTO t (a, b) VALUES ('x', '');
 UPSERT INTO t (a, b) VALUES ('y', 'z');`
 

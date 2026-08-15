@@ -9,9 +9,8 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-// a Sandbox that answers from canned output, keyed by the stage that identifies
-// the script it was given. This is what makes the orchestration testable on a
-// machine with no container runtime.
+// a Sandbox answering from canned output keyed by stage, so the orchestration
+// is testable with no container runtime
 type fakeSandbox struct {
 	mu     sync.Mutex
 	specs  []Spec
@@ -36,9 +35,8 @@ func (f *fakeSandbox) Run(_ context.Context, spec Spec) (Run, error) {
 	}
 }
 
-// answers each call from a list; the last answer repeats once the list runs
-// out, since triage is one call and every candidate after it wants the same
-// proposal back
+// answers from a list, repeating the last: triage is one call and every
+// candidate after it wants the same proposal back
 type sequencedModel struct {
 	mu        sync.Mutex
 	answers   []string
@@ -265,9 +263,8 @@ func failingBuild(Spec) Run {
 const repairedProposal = "SUMMARY: clamp the discount, with the conversion\nRATIONALE: int32 to int64.\n" +
 	fileBegin + "src/checkout/money.go\npackage money\n\nconst Fixed = 2\n" + fileEnd
 
-// The failures that come back are mechanical — a missing type conversion —
-// while the reasoning about what to change was right. Showing the model its own
-// compiler output is the cheapest way to recover that.
+// the failures are mechanical while the reasoning was right, so showing the
+// model its own compiler output is the cheapest way to recover it
 func TestCandidateIsRepairedFromItsOwnBuildFailure(t *testing.T) {
 	var runs int
 	sandbox := &fakeSandbox{

@@ -19,8 +19,6 @@ const sampleBody = `{"schema_version":"1.0","message_id":"019fe42e-18e1-7937-8c9
 
 const sampleInvestigation = "019fe42e-18e1-7936-8051-ce2536637167"
 
-// ─── doubles ────────────────────────────────────────────────────────────────
-
 // an in-memory queue: messages are handed out once, and what the worker did
 // with each one is recorded rather than guessed at from side effects.
 type fakeQueue struct {
@@ -379,11 +377,9 @@ func TestRunSurvivesReceiveErrors(t *testing.T) {
 	}
 }
 
-// The recovery path end to end. A process crashes mid-investigation, leaving
-// its row at "running"; the visibility lease lapses and SQS redelivers, which
-// is exactly what main.go's shutdown comment promises. The worker has to take
-// that delivery — reading the orphaned row as "already investigated"
-// acknowledges the message and loses the incident for good.
+// the recovery path end to end: a crash leaves the row at "running", SQS
+// redelivers, and the worker has to take it — reading the orphan as already
+// investigated acks the message and loses the incident for good
 func TestCrashedInvestigationIsReinvestigatedOnRedelivery(t *testing.T) {
 	j := newFakeJournal()
 

@@ -1,6 +1,3 @@
-// Package worker drives agent investigations from an SQS queue instead of an
-// HTTP request, so an upstream detector can hand work over and no client has to
-// hold a connection open for the length of a run.
 package worker
 
 import (
@@ -18,12 +15,10 @@ import (
 )
 
 const (
-	// how long a resolve or an acknowledgement may take. Both are single
-	// round trips; anything slower is a fault, not a slow day.
 	resolveTimeout = 15 * time.Second
 	ackTimeout     = 10 * time.Second
 
-	// receive-error backoff, so an unreachable queue does not spin
+	// receive error backoff
 	minBackoff = 2 * time.Second
 	maxBackoff = 30 * time.Second
 )
@@ -51,7 +46,7 @@ type Worker struct {
 	Agent    Investigator
 	Results  *Store
 	Config   queue.Config
-	// Remediation proposes fixes for a verdict. Nil stops at the verdict, which
+	// proposes fixes for a verdict; nil stops at the verdict, which
 	// is what running without a container runtime looks like.
 	Remediation Remediator
 
@@ -59,9 +54,8 @@ type Worker struct {
 	Sources int
 }
 
-// Run polls until ctx is cancelled. It never returns an error: a worker that
-// exits on the first bad receive is worse than one that retries, and the API it
-// runs beside must stay up regardless.
+// polls until ctx is cancelled, never returning an error: the API it runs
+// beside must stay up regardless of a bad receive
 func (w *Worker) Run(ctx context.Context) {
 	log.Printf("worker: polling %s every %s (visibility %s, giving up after %d deliveries)",
 		w.Config.QueueURL, w.Config.WaitTime, w.Config.VisibilityTimeout, w.Config.MaxAttempts)
@@ -130,10 +124,9 @@ func (w *Worker) handle(ctx context.Context, msg queue.Message) {
 	inc, err := w.Resolver.Resolve(resolveCtx, a)
 	cancelResolve()
 	if err != nil {
-		// the producer may enqueue before it commits the context row, so a
-		// missing row is a race to wait out, not a bad message. Anything else
-		// is a fault worth naming as one — an unreadable table looks identical
-		// from the queue's side, and reads as "waiting" if it is not said.
+		// the producer may enqueue before committing the context row, so a
+		// missing one is a race to wait out; anything else is a real fault,
+		// which from the queue's side looks identical unless it is said
 		if errors.Is(err, incident.ErrNotFound) {
 			log.Printf("worker: %s: no context row yet, leaving for redelivery", a)
 		} else {
@@ -176,19 +169,14 @@ func (w *Worker) handle(ctx context.Context, msg queue.Message) {
 		a, res.Iterations, res.Sources, truncatedNote(res.Truncated))
 	w.Results.Finish(a, res, nil)
 
-	// acknowledged before the handoff, never after. Remediation is N containers
-	// at a fifteen-minute ceiling each and the run budget here is ten minutes
-	// total; holding the message for it would stop the queue being consumed
-	// while the detector upstream keeps producing.
+	// acked before the handoff, never after: holding the message through N
+	// fifteen-minute containers would stop the queue being consumed
 	w.ack(msg)
 	w.remediate(a, inc, res)
 }
 
-// hand the verdict to the remediation pool, if there is one.
-//
-// Everything here is best effort by construction. The verdict is already
-// persisted and the message is already gone, so a refused or dropped handoff
-// costs the fixes and nothing else.
+// hands the verdict to the remediation pool, best effort: the verdict is
+// already persisted, so a refused handoff costs the fixes and nothing else
 func (w *Worker) remediate(a queue.Assignment, inc incident.Context, res agent.Result) {
 	if w.Remediation == nil {
 		return
@@ -227,10 +215,8 @@ func first(values ...string) string {
 	return ""
 }
 
-// renew the lease while a run is in flight. Without this a run measured at 66s
-// outlives a default visibility timeout and SQS hands the same investigation to
-// the next poll — which is exactly what an ApproximateReceiveCount of 3 on a
-// freshly produced message means.
+// renews the lease while a run is in flight; without it a 66s run outlives the
+// visibility timeout and SQS hands the same investigation to the next poll
 func (w *Worker) heartbeat(ctx context.Context, receiptHandle string) (stop func()) {
 	timeout := w.Config.VisibilityTimeout
 	interval := timeout / 3

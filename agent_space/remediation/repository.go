@@ -1,10 +1,6 @@
-// Package remediation turns a verdict into candidate fixes: it finds the
-// repository behind a failing service, runs a coding harness against a
-// throwaway checkout of it, and records what came back.
-//
-// The repository is never cloned onto this host. Everything that touches source
-// happens inside a container that is destroyed afterwards, so the only artefacts
-// that outlive a candidate are a diff and the output of whatever was run.
+// Package remediation turns a verdict into candidate fixes: find the repository
+// behind a failing service, run a coding harness against a throwaway checkout,
+// record what came back. Nothing is ever cloned onto this host.
 package remediation
 
 import (
@@ -22,15 +18,11 @@ import (
 // absent from scripts/seed-cluster.sql, which drops what it recreates
 const repositoryTable = "service_repositories"
 
-// ErrNoRepository means nothing maps this service to source code.
+// nothing maps this service to source code
 var ErrNoRepository = errors.New("remediation: no repository is mapped to this service")
 
-// where a service's code lives, and what "verified" means for it.
-//
-// The verification commands are per-service because they have to be: in the
-// OpenTelemetry demo, checkout is Go with a test suite and payment is Node with
-// none. Assuming one command across a polyglot repo produces either false
-// confidence or a pipeline that only ever works for one language.
+// where a service's code lives and what "verified" means for it; the commands
+// are per-service because a polyglot repo has no single build or test
 type Repository struct {
 	ServiceID     string `json:"service_id"`
 	Owner         string `json:"owner"`
@@ -40,13 +32,13 @@ type Repository struct {
 	// "src/checkout". Empty means the whole repository.
 	Subdirectory string `json:"subdirectory,omitempty"`
 
-	// RuntimeImage is the container the candidate is built and tested in.
+	// the container the candidate is built and tested in
 	RuntimeImage string `json:"runtime_image"`
 	// SetupCommand restores dependencies, e.g. "npm ci". May be empty.
 	SetupCommand string `json:"setup_command,omitempty"`
-	// BuildCommand is the weakest useful signal: it compiles or parses.
+	// the weakest useful signal: it compiles or parses
 	BuildCommand string `json:"build_command,omitempty"`
-	// TestCommand is the strong signal. Empty means this service has no tests,
+	// the strong signal; empty means this service has no tests,
 	// which is a fact to report rather than a failure to hide.
 	TestCommand string `json:"test_command,omitempty"`
 }
@@ -79,7 +71,7 @@ func (r Repository) Redacted() string {
 	return fmt.Sprintf("github.com/%s/%s", r.Owner, r.Repo)
 }
 
-// Repositories reads the service-to-repository mapping.
+// reads the service-to-repository mapping
 type Repositories struct {
 	Pool *pgxpool.Pool
 }
@@ -110,7 +102,7 @@ func NewRepositories(ctx context.Context, pool *pgxpool.Pool) (*Repositories, er
 	return &Repositories{Pool: pool}, nil
 }
 
-// Get returns the repository mapped to a service.
+// the repository mapped to a service
 func (r *Repositories) Get(ctx context.Context, serviceID string) (Repository, error) {
 	const q = `
 		SELECT service_id, owner, repo, default_branch, subdirectory,
@@ -133,7 +125,7 @@ func (r *Repositories) Get(ctx context.Context, serviceID string) (Repository, e
 	return repo, nil
 }
 
-// List returns every mapping, for the UI's repo picker.
+// every mapping, for the UI's repo picker
 func (r *Repositories) List(ctx context.Context) ([]Repository, error) {
 	const q = `
 		SELECT service_id, owner, repo, default_branch, subdirectory,
@@ -162,7 +154,7 @@ func (r *Repositories) List(ctx context.Context) ([]Repository, error) {
 	return out, rows.Err()
 }
 
-// Upsert writes a mapping, so the demo can be configured from a script.
+// writes a mapping, so the demo can be configured from a script
 func (r *Repositories) Upsert(ctx context.Context, repo Repository) error {
 	const q = `
 		UPSERT INTO ` + repositoryTable + ` (

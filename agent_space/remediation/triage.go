@@ -10,13 +10,9 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-// Triage answers one question before any fix is attempted: is the fault the
-// incident describes actually present in the code as it stands?
-//
-// It exists because the expensive path is the one after it. Fanning out N
-// coding-harness runs, each in its own container, to fix something that was
-// fixed weeks ago costs real money and produces confident nonsense. Asking
-// first is a few seconds and one cheap model call.
+// answers one question before any fix is attempted: is the fault actually
+// present in the code as it stands? Asking costs one cheap model call; fanning
+// out N containers to fix something already fixed costs real money.
 type TriageStatus string
 
 const (
@@ -30,7 +26,7 @@ const (
 	TriageCommitMissing TriageStatus = "commit_missing"
 )
 
-// Triage is the gate's finding.
+// the gate's finding
 type Triage struct {
 	Status TriageStatus `json:"status"`
 	// the commit the verdict implicated, as resolved in the repository
@@ -38,18 +34,15 @@ type Triage struct {
 	CommitExists bool   `json:"commit_exists"`
 	// Files the fault is believed to live in, from the model's reading
 	Files []string `json:"files,omitempty"`
-	// Evidence is the reasoning, shown to the engineer next to the candidates
+	// the reasoning, shown to the engineer next to the candidates
 	Evidence   string  `json:"evidence,omitempty"`
 	Confidence float64 `json:"confidence,omitempty"`
 	// what the sandbox actually gathered, kept for the trace
 	CommitSubject string `json:"commit_subject,omitempty"`
 }
 
-// whether it is worth spending containers on candidate fixes.
-//
-// Inconclusive proceeds: the gate is there to stop obvious waste, not to
-// overrule an incident because a small model could not decide. Only a fault
-// that is demonstrably absent, or a commit that does not exist, stops the run.
+// whether it is worth spending containers; inconclusive proceeds, since the
+// gate stops obvious waste rather than overruling an undecided small model
 func (t Triage) ShouldRemediate() bool {
 	return t.Status == TriageConfirmed || t.Status == TriageInconclusive
 }
@@ -69,9 +62,7 @@ const (
 	maxSourceLines = 600
 )
 
-// BuildTriageScript gathers evidence about an implicated commit. It only reads:
-// nothing here changes the checkout, so a failed triage cannot corrupt anything
-// a later stage depends on.
+// gathers evidence about an implicated commit, and only reads
 func BuildTriageScript(repo Repository, cloneURL, sha string) string {
 	var b strings.Builder
 
@@ -214,9 +205,8 @@ func writeSection(b *strings.Builder, heading string, s Section) {
 
 var triageBlockRE = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
 
-// read the model's finding, falling back to the prose for the same reason the
-// verdict parser does: a small free model states a clear conclusion and then
-// forgets the block it was asked for
+// the model's finding, falling back to prose because a small model states a
+// clear conclusion and then forgets the block it was asked for
 func parseTriage(answer string) Triage {
 	if matches := triageBlockRE.FindAllStringSubmatch(answer, -1); len(matches) > 0 {
 		var parsed struct {

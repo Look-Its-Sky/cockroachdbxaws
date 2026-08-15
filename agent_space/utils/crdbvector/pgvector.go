@@ -46,7 +46,7 @@ type CloseNoErr interface {
 	Close()
 }
 
-// Store is a wrapper around the pgvector client.
+// a wrapper around the pgvector client
 type Store struct {
 	embedder            embeddings.Embedder
 	connURL             string
@@ -189,7 +189,7 @@ func (s Store) createEmbeddingTableIfNotExists(ctx context.Context, tx pgx.Tx) e
 	return nil
 }
 
-// AddDocuments adds documents to the collection and returns their ids.
+// adds documents to the collection and returns their ids
 func (s Store) AddDocuments(
 	ctx context.Context,
 	docs []schema.Document,

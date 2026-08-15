@@ -103,9 +103,8 @@ func TestApplyCommandWritesAbsolutePaths(t *testing.T) {
 		t.Fatalf("ApplyCommand: %v", err)
 	}
 
-	// BuildScript has already cd'd into the service directory by this point, so
-	// a relative path would write to the wrong place and a cd would leak into
-	// the build and test stages
+	// BuildScript has already cd'd into the service dir, so a relative path
+	// writes to the wrong place and a cd leaks into the later stages
 	if !strings.Contains(cmd, "'/workspace/src/checkout/main.go'") {
 		t.Errorf("target is not absolute:\n%s", cmd)
 	}
@@ -135,10 +134,8 @@ func TestApplyCommandFailsWhenAFileWasNotWritten(t *testing.T) {
 	}
 }
 
-// the apply stage is shell, so the only honest test of it is a shell.
-//
-// Run against a temporary directory standing in for /workspace, which is the
-// one substitution needed to exercise the real generated script.
+// the apply stage is shell, so the only honest test of it is a shell, run
+// against a temp dir standing in for /workspace
 func TestApplyCommandWritesTheFilesItSaysItDoes(t *testing.T) {
 	// deliberately nasty: a raw string, an unexpanded variable, a backtick and
 	// a single quote all have to survive being written by a shell
@@ -277,10 +274,8 @@ func TestProposalPromptOmitsPrecedentSectionWhenThereIsNone(t *testing.T) {
 	}
 }
 
-// The failure that presented as "the model has nothing to say" and was really
-// "the budget was too small to say it". Reasoning tokens are billed against the
-// completion budget, so a model that thinks at length returns an empty message
-// with a length stop — no error, nothing to parse.
+// presented as "the model has nothing to say" and was really "the budget was
+// too small to say it": reasoning is billed against the completion budget
 func TestEmptyModelMessageNamesTheReasoningBudget(t *testing.T) {
 	_, err := choiceContent(&llms.ContentResponse{
 		Choices: []*llms.ContentChoice{{Content: "  \n ", StopReason: "length"}},
@@ -317,10 +312,9 @@ func TestContentIsReturnedUnchangedWhenPresent(t *testing.T) {
 	}
 }
 
-// Both prompts must carry the output contract in full. The calls are stateless,
-// so "the same format as before" refers to nothing: a repair without the markers
-// answers in markdown, and a correct fix is discarded as though the model had
-// said nothing at all. That silently disabled the whole repair round.
+// both prompts must carry the output contract in full, because the calls are
+// stateless and "the same format as before" refers to nothing; without it a
+// repair answers in markdown and a correct fix is discarded
 func TestBothPromptsStateTheOutputFormat(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"proposal": proposalPrompt,

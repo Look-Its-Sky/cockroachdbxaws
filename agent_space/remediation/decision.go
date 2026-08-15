@@ -9,10 +9,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Why a candidate was not taken. The distinction is the whole quality signal
-// for this feature: a reason from the sandbox is something the system already
-// knew, and a reason from an engineer is the only part it could not compute
-// for itself.
+// why a candidate was not taken; the source is the quality signal, since only
+// an engineer's reason is something the system could not compute itself
 type RejectionSource string
 
 const (
@@ -20,7 +18,7 @@ const (
 	RejectionFromVerification RejectionSource = "verification"
 )
 
-// Rejection is one candidate the engineer did not take, and why.
+// one candidate the engineer did not take, and why
 type Rejection struct {
 	CandidateID string          `json:"candidate_id"`
 	Strategy    string          `json:"strategy,omitempty"`
@@ -28,19 +26,16 @@ type Rejection struct {
 	Source      RejectionSource `json:"source"`
 }
 
-// Decision is an engineer's verdict on a set of proposed fixes.
-//
-// This is the only place in the pipeline where human judgement is written down.
-// Everything else records what a model produced or what a container proved.
+// an engineer's verdict on a set of proposed fixes, and the only place in the
+// pipeline where human judgement is written down
 type Decision struct {
 	ID              string `json:"id"`
 	InvestigationID string `json:"investigation_id"`
 	IncidentID      string `json:"incident_id,omitempty"`
 	ServiceID       string `json:"service_id,omitempty"`
 
-	// ChosenCandidateID is empty when every candidate was rejected, which is
-	// not a failure to record: what the engineer wrote instead is the most
-	// useful thing in this table.
+	// empty when every candidate was rejected, which is worth recording: what
+	// the engineer did instead is the most useful thing in this table
 	ChosenCandidateID string      `json:"chosen_candidate_id,omitempty"`
 	Rejections        []Rejection `json:"rejections,omitempty"`
 
@@ -48,23 +43,18 @@ type Decision struct {
 	EngineerPRURL string `json:"engineer_pr_url,omitempty"`
 	Notes         string `json:"notes,omitempty"`
 
-	// Document is the prose that gets embedded. Stored rather than rebuilt on
-	// demand, so changing the embedding model is a re-index rather than a loss,
-	// and so what was recalled later is exactly what was written now.
+	// the prose that gets embedded, stored rather than rebuilt so an embedding
+	// swap is a re-index and what is recalled is what was written
 	Document string `json:"document,omitempty"`
 
 	DecidedAt time.Time `json:"decided_at"`
-	// IndexedAt is nil until the embedding lands. Nil is also the work queue
+	// nil until the embedding lands, which also makes it the work queue
 	// for a retry: a decision that is not indexed will never be recalled.
 	IndexedAt *time.Time `json:"indexed_at,omitempty"`
 }
 
-// DecisionInput is what an engineer supplied, and nothing else.
-//
-// Every factual field — what was verified, which strategy won, what triage
-// found — is read from the stored Outcome instead. The document this produces
-// becomes context for future incidents, so a caller must not be able to assert
-// that something passed its tests when it did not.
+// what an engineer supplied, and nothing else; every factual field comes from
+// the stored Outcome, so a caller cannot claim tests passed when they did not
 type DecisionInput struct {
 	ChosenCandidateID string
 	// Reasons the engineer typed, by candidate id. A candidate absent from this
@@ -75,17 +65,16 @@ type DecisionInput struct {
 	EngineerPRURL string
 	Notes         string
 
-	// IncidentSummary is the prose the investigation ran against, resolved
-	// server-side. It leads the document, because the thing a future incident
-	// is matched against is a description of a fault.
+	// the prose the investigation ran against, resolved server-side; it leads
+	// the document because a future incident is matched on a fault description
 	IncidentSummary string
 }
 
 var (
-	// ErrEmptyDecision means nothing was actually decided. Such a record would
-	// still be embedded and recalled, while teaching nothing.
+	// nothing was actually decided; such a record would still be embedded and
+	// recalled, while teaching nothing
 	ErrEmptyDecision = errors.New("remediation: a decision needs a chosen candidate, an engineer fix, or a note")
-	// ErrForeignCandidate means an id that is not part of this investigation.
+	// an id that is not part of this investigation
 	ErrForeignCandidate = errors.New("remediation: that candidate does not belong to this investigation")
 )
 
@@ -93,13 +82,9 @@ var (
 // short enough that a handful of precedents do not crowd out the live incident.
 const maxSummaryChars = 1200
 
-// NewDecision assembles a decision from what the engineer said and what the run
-// already established.
-//
-// Candidates the engineer did not mention are still recorded as rejected, with
-// the reason the sandbox produced. Silence is the common case — an engineer
-// picks one and types nothing — and a record that only listed the winner would
-// lose the fact that the others were seen and passed over.
+// assembles a decision from what the engineer said and what the run established.
+// Unmentioned candidates are still recorded as rejected with the sandbox's
+// reason, since silence is the common case and the winner alone teaches little.
 func NewDecision(o Outcome, in DecisionInput) (Decision, error) {
 	byID := make(map[string]Candidate, len(o.Candidates))
 	for _, c := range o.Candidates {
@@ -160,10 +145,8 @@ func NewDecision(o Outcome, in DecisionInput) (Decision, error) {
 	return d, nil
 }
 
-// what the sandbox established about a candidate nobody explained.
-//
-// A candidate that never produced a diff failed before it could be judged, and
-// saying "it was not chosen" would imply a judgement that was never made.
+// what the sandbox established about a candidate nobody explained; one that
+// never produced a diff failed before it could be judged at all
 func verificationReason(c Candidate) string {
 	if c.Error != "" {
 		return "never produced a usable change: " + c.Error
@@ -171,11 +154,8 @@ func verificationReason(c Candidate) string {
 	return c.Verification.Summary()
 }
 
-// EngineerWroteReasons counts the rejections a human explained.
-//
-// Surfaced because it is the measure of whether this feature is earning its
-// keep: rejections that are only ever auto-filled teach the system nothing it
-// could not already work out.
+// how many rejections a human explained, which is the measure of whether this
+// is earning its keep: auto-filled reasons teach nothing new
 func (d Decision) EngineerWroteReasons() int {
 	n := 0
 	for _, r := range d.Rejections {
@@ -186,17 +166,14 @@ func (d Decision) EngineerWroteReasons() int {
 	return n
 }
 
-// RejectedEverything reports the case worth reading closely: the agent proposed
-// fixes and a human took none of them.
+// the case worth reading closely: the agent proposed fixes and a human took
+// none of them
 func (d Decision) RejectedEverything() bool {
 	return d.ChosenCandidateID == "" && len(d.Rejections) > 0
 }
 
-// the prose that gets embedded.
-//
-// Shaped like the incidents already in the index — a paragraph naming the
-// symptom, the commit and the resolution — so it retrieves alongside them and
-// reads as one more piece of history rather than as a different kind of record.
+// the prose that gets embedded, shaped like the incidents already in the index
+// so it retrieves alongside them rather than as a different kind of record
 func buildDecisionDocument(o Outcome, d Decision, summary string) string {
 	var b strings.Builder
 

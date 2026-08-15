@@ -10,18 +10,15 @@ import (
 	"github.com/google/go-github/v75/github"
 )
 
-// ErrNoToken means no GitHub credential is configured, so a draft cannot open.
+// no GitHub credential is configured, so a draft cannot open
 var ErrNoToken = errors.New("remediation: GITHUB_TOKEN is not set, so no pull request can be opened")
 
-// Publisher opens draft pull requests for candidates an engineer has picked.
-//
-// It works through the Git data API rather than by pushing from the sandbox.
-// The candidate's whole-file contents are already in hand, so a blob, a tree, a
-// commit and a ref are four calls — and it means the token never has to enter a
-// container that just ran code a model wrote.
+// opens draft PRs through the Git data API rather than pushing from the
+// sandbox: the file contents are already in hand, and the token never has to
+// enter a container that just ran model-written code
 type Publisher struct {
 	Token string
-	// Draft is what makes this safe to wire to a button. Always true in
+	// what makes this safe to wire to a button; always true in
 	// practice; it is a field so a test can assert on it.
 	Draft bool
 }
@@ -111,19 +108,15 @@ func (p *Publisher) Open(ctx context.Context, repo Repository, c Candidate) (str
 	return pr.GetHTMLURL(), nil
 }
 
-// ErrTokenCannotWrite means the credential is valid but read-only.
+// the credential is valid but read-only
 var ErrTokenCannotWrite = errors.New("remediation: GITHUB_TOKEN cannot write to this repository")
 
 // where the permission actually lives, since this is not guessable from the error
 const tokenSettingsURL = "https://github.com/settings/personal-access-tokens"
 
-// turn GitHub's 403 into something the person reading it can act on.
-//
-// A fine-grained token that is missing a permission says only "Resource not
-// accessible by personal access token", and the repository's own `permissions`
-// block unhelpfully reports push: true — that is the *account's* access, not
-// the token's grant. Surfacing the raw message sends whoever clicked the button
-// to read our source instead of their token settings.
+// turns GitHub's 403 into something actionable. The raw message names no
+// permission, and the repo's `permissions` block reports the account's access
+// rather than the token's grant, so it sends people to the wrong place.
 func permissionAwareError(what string, repo Repository, err error) error {
 	var apiErr *github.ErrorResponse
 	if errors.As(err, &apiErr) && apiErr.Response != nil {
@@ -178,11 +171,8 @@ func commitMessage(c Candidate) string {
 	return b.String()
 }
 
-// PRBody is what a reviewer reads first.
-//
-// It states what was actually verified in the words Verification.Summary uses,
-// because the one thing this must never do is let "it compiles" reach a
-// reviewer looking like "the tests pass".
+// what a reviewer reads first, in Verification.Summary's words, because "it
+// compiles" must never reach them looking like "the tests pass"
 func PRBody(c Candidate) string {
 	var b strings.Builder
 

@@ -21,7 +21,7 @@ type Tool struct {
 
 var _ tools.Tool = (*Tool)(nil)
 
-// Name returns the MCP tool name.
+// the MCP tool name
 func (t *Tool) Name() string { return t.remote.Name }
 
 // published on every cluster-scoped tool, for use only when the session is not already scoped

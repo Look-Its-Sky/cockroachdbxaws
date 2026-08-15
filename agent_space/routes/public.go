@@ -24,15 +24,14 @@ var (
 	// verdicts from the SQS worker; nil when no queue is configured
 	Results *worker.Store
 
-	// the remediation half. Each is nil when its prerequisite is missing — no
-	// container runtime, no database, no GitHub token — and the routes that
-	// need one say which is absent rather than failing obscurely.
+	// the remediation half; each is nil when its prerequisite is missing, and
+	// the routes that need one say which
 	Remediation *remediation.Runner
 	Solutions   *remediation.Solutions
 	Repos       *remediation.Repositories
 	Publisher   *remediation.Publisher
 	// where recorded decisions are embedded so future incidents recall them.
-	// Nil records decisions without indexing them, which the response says.
+	// nil records decisions without indexing them, which the response says
 	PrecedentIndex *remediation.Precedents
 	// reads incident prose back for a remediation started from the API
 	Incidents *incident.Resolver

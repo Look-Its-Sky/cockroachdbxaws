@@ -40,9 +40,8 @@ var (
 
 const schemaLoadTimeout = 60 * time.Second
 
-// how far past a run's own ceiling a "running" row has to be before it is
-// treated as abandoned. Slack so that a run finishing exactly at its deadline
-// is not reclaimed out from under itself.
+// slack past a run's own ceiling before a "running" row is treated as
+// abandoned, so one finishing at its deadline is not reclaimed under itself
 const staleSlack = 5 * time.Minute
 
 func initStore() {
@@ -85,14 +84,9 @@ func initStore() {
 	}
 }
 
-// the index of decisions engineers have made, which is what lets the agent
-// learn from a pick rather than forgetting it.
-//
-// Its own collection, sharing the same physical tables as the incident index.
-// That is not tidiness: the store's filters are equality-only, so there is no
-// way to say "not a decision", and decisions living alongside the incidents
-// would quietly take recall slots away from the incident history the agent
-// depends on.
+// the index of decisions engineers have made, in its own collection on the same
+// tables: the store's filters are equality-only, so decisions living beside the
+// incidents would quietly take recall slots from the incident history
 func initPrecedents() {
 	embedder, err := utils.GetEmbedder()
 	if err != nil {
@@ -240,9 +234,8 @@ func initWorker() {
 		return
 	}
 
-	// verdicts outlive the process when the journal is available. When it is
-	// not, the worker still runs: it loses durability, not the ability to
-	// investigate, and saying so is better than refusing to start.
+	// without a journal the worker still runs; it loses durability, not the
+	// ability to investigate
 	sqsResults = worker.NewStore()
 	if journal, err := worker.NewPGJournal(context.Background(), pool); err != nil {
 		log.Printf("Worker: verdicts will be in-memory only, lost on restart: %v", err)
@@ -270,14 +263,11 @@ func initWorker() {
 }
 
 // the remediation pipeline: triage, candidate fixes, verification, draft PRs.
-//
-// Every prerequisite is optional in the same way MCP and the queue are. A
-// missing container runtime is the common case on a laptop, and it must leave
-// the investigation half working rather than refusing to boot.
+// Every prerequisite is optional, so a laptop with no container runtime still
+// boots with the investigation half working.
 func initRemediation() {
-	// unset means on. The prerequisites below already degrade gracefully when
-	// they are missing, so there is nothing to protect against by default; the
-	// variable exists to turn it off deliberately on a machine that could run it.
+	// unset means on: the prerequisites below already degrade, so this exists
+	// only to turn it off deliberately on a machine that could run it
 	if raw, set := os.LookupEnv("REMEDIATION_ENABLED"); set && !utils.EnvBool("REMEDIATION_ENABLED") {
 		log.Printf("Remediation: REMEDIATION_ENABLED=%q; verdicts will not be turned into fixes.", raw)
 		return
@@ -327,19 +317,15 @@ func initRemediation() {
 		Precedents:           precedents,
 		JobConcurrency:       envInt("REMEDIATION_JOBS", 0),
 		CandidateConcurrency: envInt("REMEDIATION_CANDIDATE_CONCURRENCY", 0),
-		// -1 turns repair off, which envInt cannot express: it treats anything
-		// not positive as "use the default". Read separately so the off switch
-		// exists at all.
+		// -1 turns repair off, which envInt cannot express: it reads anything
+		// not positive as "use the default"
 		MaxRepairs: repairRounds(),
 	}
 }
 
-// mark investigations that a previous process left running.
-//
-// Age-gated on the run's own ceiling, so this stays correct with a second
-// process polling the same queue: past that, a run cannot still be in flight.
-// Recovering the work is Store.Seen's job — SQS redelivers it, and a sweep here
-// would only race that. This exists so nothing reports a dead run as live.
+// mark investigations a previous process left running. Age-gated on the run's
+// own ceiling, so a second process polling the same queue is unaffected;
+// recovering the work is Seen's job, this only stops a dead run reading as live.
 func reclaimInvestigations(journal *worker.PGJournal, runTimeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), schemaLoadTimeout)
 	defer cancel()
@@ -354,11 +340,8 @@ func reclaimInvestigations(journal *worker.PGJournal, runTimeout time.Duration) 
 	}
 }
 
-// mark remediations that a previous process left running.
-//
-// Unconditional, because nothing outside this process could have been running
-// one, and because there is no redelivery to recover a remediation: without
-// this it reports "running" to the UI forever.
+// mark remediations a previous process left running. Unconditional: nothing
+// else could have been running one, and no redelivery will recover it.
 func reclaimRemediations(s *remediation.Solutions) {
 	ctx, cancel := context.WithTimeout(context.Background(), schemaLoadTimeout)
 	defer cancel()
@@ -373,9 +356,8 @@ func reclaimRemediations(s *remediation.Solutions) {
 	}
 }
 
-// how many repair rounds a candidate gets. 0 means the package default; an
-// explicit 0 in the environment means none, which is why this cannot go
-// through envInt.
+// how many repair rounds a candidate gets; an explicit 0 means none, which is
+// why this cannot go through envInt
 func repairRounds() int {
 	raw := strings.TrimSpace(os.Getenv("REMEDIATION_MAX_REPAIRS"))
 	if raw == "" {

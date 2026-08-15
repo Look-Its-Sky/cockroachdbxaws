@@ -10,18 +10,12 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-// The model rewrites whole files rather than emitting a unified diff.
-//
-// A diff has to be correct about line numbers and context before it can be
-// applied at all, and a small model gets that wrong far more often than it gets
-// the actual fix wrong — which turns a good change into an apply failure. A
-// whole file is written with `cat`, which cannot fail for the wrong reasons, and
-// `git diff` inside the sandbox produces the real unified diff afterwards. The
-// diff an engineer reviews is therefore always one git itself computed.
+// the model rewrites whole files rather than emitting a unified diff: a small
+// model gets line numbers wrong far more often than the fix, turning good
+// changes into apply failures. `git diff` in the sandbox computes the real one.
 const (
-	// matched without the trailing space, so a block header carrying no path
-	// still opens a block and is then rejected by validation, rather than being
-	// mistaken for prose and silently swallowing the file under it
+	// matched without the trailing space, so a header with no path still opens a
+	// block and is rejected by validation rather than swallowing the file under it
 	fileMarker = "__SRE_FILE__"
 	fileBegin  = fileMarker + " "
 	fileEnd    = "__SRE_FILE_END__"
@@ -35,9 +29,8 @@ const (
 // this line are rejected in Go rather than producing a script that ends early.
 const patchDelimiter = "__SRE_PATCH_EOF__"
 
-// caps on what crosses into a prompt. A file bigger than this is not a
-// candidate for whole-file rewriting anyway: the model would spend its whole
-// budget copying it out, and any slip silently deletes code.
+// caps on what crosses into a prompt; past this the model spends its budget
+// copying the file out and any slip silently deletes code
 const (
 	maxFileBytes = 60000
 	maxFileCount = 12
@@ -49,7 +42,7 @@ const (
 	stageSources = "sources"
 )
 
-// Sourced is one file as it stands in the repository.
+// one file as it stands in the repository
 type Sourced struct {
 	Path     string
 	Contents string
@@ -59,10 +52,8 @@ type Sourced struct {
 	Missing  bool
 }
 
-// BuildInspectScript reads whole files out of a fresh checkout. It only reads:
-// this runs before anything has been decided, and a failed inspection must not
-// leave a checkout a later stage would inherit — it does not, because the
-// container is destroyed either way.
+// reads whole files out of a fresh checkout, and only reads: this runs before
+// anything is decided
 func BuildInspectScript(repo Repository, cloneURL, sha string, files []string) string {
 	var b strings.Builder
 
@@ -115,7 +106,7 @@ func clampFiles(files []string) []string {
 	return out
 }
 
-// ParseSources pulls whole files back out of an inspection run.
+// pulls whole files back out of an inspection run
 func ParseSources(sections map[string]Section) []Sourced {
 	body := sections[stageSources].Output
 	if strings.TrimSpace(body) == "" {
@@ -162,31 +153,29 @@ func ParseSources(sections map[string]Section) []Sourced {
 	return out
 }
 
-// FileEdit is one whole file as the model would have it.
+// one whole file as the model would have it
 type FileEdit struct {
 	Path     string `json:"path"`
 	Contents string `json:"contents"`
 }
 
-// Proposal is one model's answer: what it would change and why.
+// one model's answer: what it would change and why
 type Proposal struct {
 	Summary   string
 	Rationale string
 	Edits     []FileEdit
 }
 
-// Strategy is one way of asking for a fix. Several exist so the engineer is
-// offered genuinely different changes rather than the same one three times at
-// different temperatures.
+// one way of asking for a fix; several exist so an engineer sees genuinely
+// different changes, not the same one three times at different temperatures
 type Strategy struct {
 	Name        string
 	Instruction string
 	Temperature float64
 }
 
-// Deliberately different in kind, not degree. The narrow one is usually right
-// during an incident; the thorough one is what a reviewer would have asked for
-// anyway; the defensive one is what stops the same page firing next week.
+// different in kind, not degree: narrow is usually right during an incident,
+// thorough is what a reviewer would ask for, defensive stops the next page
 var DefaultStrategies = []Strategy{
 	{
 		Name:        "minimal",
@@ -210,7 +199,7 @@ var DefaultStrategies = []Strategy{
 	},
 }
 
-// ProposalInput is everything the model is given to write a fix from.
+// everything the model is given to write a fix from
 type ProposalInput struct {
 	IncidentSummary string
 	VerdictAnswer   string
@@ -218,19 +207,13 @@ type ProposalInput struct {
 	Repository      Repository
 	Sources         []Sourced
 	Tree            string
-	// Precedents are decisions engineers recorded on similar incidents: which
-	// fix they took and what they turned down. Empty is the ordinary case
-	// early on, and changes nothing.
+	// decisions engineers recorded on similar incidents; empty is ordinary early on
 	Precedents []string
 }
 
-// The output contract. Shared by the first attempt and by every repair, and
-// stated in full both times.
-//
-// It has to be repeated because these calls carry no history. A repair told to
-// "reply in the same format as before" is being referred to a conversation it
-// was never part of: it answers in markdown, ParseProposal finds no markers,
-// and a correct fix is thrown away as though the model had said nothing.
+// the output contract, stated in full to both the first attempt and every
+// repair. These calls carry no history, so "the same format as before" refers
+// to a conversation the model was never part of.
 const outputFormat = `Reply with a one-line summary, a short rationale, and then the complete new
 contents of every file you are changing, in exactly this format:
 
@@ -286,12 +269,9 @@ func Propose(ctx context.Context, model llms.Model, in ProposalInput, s Strategy
 	return ParseProposal(content)
 }
 
-// the model's text, or an error saying why there is none.
-//
-// An empty message with a "length" stop is the reasoning-budget failure, and it
-// is worth naming in those words: it presents as the model having nothing to
-// say, which reads as a bad model rather than as a budget that was too small.
-// That misreading cost two full pipeline runs and a model swap to unpick.
+// the model's text, or an error saying why there is none. An empty message with
+// a "length" stop is the reasoning-budget failure, named in those words because
+// it otherwise reads as a weak model rather than too small a budget.
 func choiceContent(resp *llms.ContentResponse, what string) (string, error) {
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("remediation: %s: model returned no choices", what)
@@ -308,14 +288,9 @@ func choiceContent(resp *llms.ContentResponse, what string) (string, error) {
 		what, fallback(choice.StopReason, "unknown"), proposalBudget)
 }
 
-// Whole files come back out, so this has to be far larger than the verdict's.
-//
-// It also has to absorb reasoning. Providers count a model's internal thinking
-// against this same budget, so a reasoning model given too little spends all of
-// it deliberating and returns an empty message — no error, no content, nothing
-// to parse. Measured on qwen3.7-flash: ~3,000 reasoning tokens for a trivial
-// one-function fix, before a single character of the answer. A real repair
-// carries whole files and a compiler log, and reasons proportionally.
+// far larger than the verdict's, because whole files come back out and
+// reasoning tokens count against the same budget; too little and the model
+// spends all of it thinking and returns nothing to parse.
 const proposalBudget = 32000
 
 func buildProposalPrompt(in ProposalInput) string {
@@ -366,9 +341,9 @@ func buildProposalPrompt(in ProposalInput) string {
 	return b.String()
 }
 
-// Failure is how the previous attempt was rejected, in the toolchain's words.
+// how the previous attempt was rejected, in the toolchain's words
 type Failure struct {
-	// Stage is "build" or "test": which one said no.
+	// "build" or "test": which one said no
 	Stage string
 	Log   string
 }
@@ -385,21 +360,9 @@ what the toolchain said, and the current contents of the files as you left them.
 - Change as little as the error requires. A type conversion is a type
   conversion; do not rewrite the function around it.`
 
-// Repair shows a candidate its own failure and asks again.
-//
-// It exists because the failures that come back are overwhelmingly mechanical —
-// a missing type conversion, an unused import, an off-by-one in a test
-// expectation — while the reasoning about *what* to change was right. Throwing
-// that away and resampling from scratch costs the same and usually reproduces
-// the same class of slip; handing back the compiler output fixes it in one.
-// what this team has accepted and turned down before.
-//
-// Framed as a constraint rather than as an example, deliberately. The three
-// strategies are meant to differ, and the fan-out only earns its containers
-// while they do: a model shown "here is a fix that was accepted" will write
-// that fix three times over, and ranking is left with nothing to choose
-// between. What is useful here is the taste — how large a change this team
-// tolerates, what it calls out of scope — not the patch.
+// what this team has accepted and turned down before, framed as a constraint
+// rather than an example: shown a fix that was accepted, a model writes it three
+// times over and ranking has nothing to choose between.
 func writePrecedents(b *strings.Builder, precedents []string) {
 	if len(precedents) == 0 {
 		return
@@ -418,6 +381,8 @@ func writePrecedents(b *strings.Builder, precedents []string) {
 	}
 }
 
+// shows a candidate its own failure and asks again; the failures are mostly
+// mechanical, so handing back the compiler output beats resampling from scratch
 func Repair(ctx context.Context, model llms.Model, in ProposalInput, previous Proposal, f Failure, s Strategy) (Proposal, error) {
 	if model == nil {
 		return Proposal{}, errors.New("remediation: no model configured")
@@ -470,10 +435,8 @@ func sourcedFrom(edits []FileEdit) []Sourced {
 	return out
 }
 
-// ParseProposal reads a model's answer back into a proposal.
-//
-// A missing block is not an error: "no change" is a legitimate answer, and the
-// caller distinguishes an empty proposal from a failed one.
+// reads a model's answer back into a proposal; a missing block is not an error,
+// since "no change" is a legitimate answer
 func ParseProposal(answer string) (Proposal, error) {
 	var (
 		p       Proposal
@@ -593,10 +556,8 @@ func repoPath(p string) (string, error) {
 	return clean, nil
 }
 
-// ApplyCommand is the harness stage: it writes the proposed files into the
-// checkout. Absolute paths throughout, because BuildScript has already changed
-// into the service directory by this point and a `cd` here would leak into the
-// build and test stages that follow.
+// writes the proposed files into the checkout, with absolute paths throughout:
+// BuildScript has already cd'd into the service dir and a `cd` here would leak
 func ApplyCommand(edits []FileEdit) (string, error) {
 	if len(edits) == 0 {
 		return "", errors.New("remediation: proposal changes no files")
@@ -623,10 +584,9 @@ func ApplyCommand(edits []FileEdit) (string, error) {
 		fmt.Fprintf(&b, "%s\n", patchDelimiter)
 	}
 
-	// The stage's exit code is the last command's, so this loop is what makes
-	// "applied" mean anything: without it a failed write would still be
-	// followed by a successful echo, and the candidate would be verified as
-	// though the change were there.
+	// a stage's exit code is its last command's, so this check is what makes
+	// "applied" mean anything; without it a failed write still ends in a
+	// successful echo and the candidate verifies as though the change landed
 	fmt.Fprintf(&b, "for f in %s; do\n", strings.Join(targets, " "))
 	b.WriteString("  [ -e \"$f\" ] || { echo \"could not write $f\"; exit 91; }\n")
 	b.WriteString("  echo \"wrote $f\"\n")

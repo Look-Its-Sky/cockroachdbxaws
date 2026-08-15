@@ -522,7 +522,11 @@ two on identical code). Do not quote 66s as reliable without
 - **Nothing is on `PATH` on this NixOS box** — not `go`, not `docker`. Use
   `nix develop` in `agent_space/`. Flakes only see git-tracked files, so
   `flake.nix` and `flake.lock` must be `git add`ed before `nix develop` works at
-  all. There is no container runtime available here to test against.
+  all. The container runtime **does** work here — docker 29.6.2 and podman 5.8.2
+  both answer the `version --format {{.Server.Version}}` probe that
+  `ContainerSandbox.Available` runs, so `cmd/sandboxcheck` and the remediation
+  sandbox can be exercised locally. An earlier note here claimed otherwise; it
+  was only ever the CLI missing from a plain shell, which `nix develop` supplies.
 - **`~/.gitconfig` points the credential helper at `/usr/bin/gh`, which does not
   exist** — `gh` is at `~/.local/bin/gh`. Pushes fail with
   `No such file or directory`. Workaround, not fixed (it is global config):

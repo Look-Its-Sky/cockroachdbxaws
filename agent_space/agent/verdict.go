@@ -30,7 +30,7 @@ type Verdict struct {
 	Source VerdictSource `json:"source,omitempty"`
 }
 
-// VerdictSource records how a verdict was extracted.
+// how a verdict was extracted
 type VerdictSource string
 
 const (
@@ -42,7 +42,7 @@ const (
 	SourceAbsent VerdictSource = "absent"
 )
 
-// Decided reports whether the verdict names an action to take.
+// whether the verdict names an action to take
 func (v Verdict) Decided() bool {
 	return v.Decision == DecisionRollback || v.Decision == DecisionHotfix
 }
@@ -69,13 +69,9 @@ var (
 	shaRE = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
 )
 
-// pull the structured verdict out of an answer, returning it alongside the
-// prose with the JSON block removed.
-//
-// The block is the happy path. The fallback exists because the models this runs
-// against are small and free, and one that writes a perfect paragraph but
-// forgets the block should still drive the pipeline — silently returning
-// UNKNOWN there would strand every incident.
+// the structured verdict, returned alongside the prose with the JSON removed.
+// The fallback exists because a small model that writes a perfect paragraph and
+// forgets the block should still drive the pipeline.
 func parseVerdict(answer string) (Verdict, string) {
 	if v, prose, ok := verdictFromBlock(answer); ok {
 		return v, prose
@@ -145,9 +141,8 @@ func verdictFromProse(answer string) Verdict {
 	}
 }
 
-// the first thing shaped like a commit SHA. Hex words that are really English
-// ("added", "decade") are possible in principle but need to be 7+ characters of
-// pure hex, which prose does not produce.
+// the first thing shaped like a commit SHA; English hex words need 7+ pure hex
+// characters, which prose does not produce
 func firstSHA(answer string) string {
 	for _, candidate := range shaRE.FindAllString(answer, -1) {
 		if strings.ContainsAny(candidate, "0123456789") {

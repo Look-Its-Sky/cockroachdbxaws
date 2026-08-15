@@ -9,9 +9,9 @@ import (
 type Cause string
 
 const (
-	// CauseMalformedCall is a tool call carrying no function at all.
+	// a tool call carrying no function at all
 	CauseMalformedCall Cause = "malformed_call"
-	// CauseUnknownTool is a call naming a tool that was never offered.
+	// a call naming a tool that was never offered
 	CauseUnknownTool Cause = "unknown_tool"
 	// arguments that did not parse against the schema, so nothing was sent
 	CauseInvalidArguments Cause = "invalid_arguments"
@@ -35,11 +35,11 @@ type Step struct {
 	Output     string         `json:"output"`
 	DurationMS int64          `json:"duration_ms"`
 	Failed     bool           `json:"failed"`
-	// Cause is set only on failed steps, and names which kind of failure.
+	// set only on failed steps, naming which kind of failure
 	Cause Cause `json:"cause,omitempty"`
 }
 
-// Result is a completed agent run.
+// a completed agent run
 type Result struct {
 	Answer string `json:"answer"`
 	// the same decision as Answer, in a form the remediation pipeline can

@@ -13,32 +13,26 @@ import (
 	"agent_space/agent"
 )
 
-// where verdicts outlive the process. Not named in scripts/seed-cluster.sql on
-// purpose: that script DROPs what it recreates, and resetting the demo data
-// must not throw away investigation history.
+// where verdicts outlive the process; absent from seed-cluster.sql on purpose,
+// since that script drops what it recreates
 const journalTable = "investigations"
 
-// somewhere to persist verdicts, so a restart does not lose them and a
-// redelivered message is not investigated a second time.
-//
-// Every method may fail without consequence to a run: the Store treats this as
-// a best-effort mirror of what it already holds in memory. A database that is
-// down slows nothing down and loses only durability.
+// somewhere to persist verdicts across a restart. Every method may fail without
+// consequence: the Store treats this as a mirror of what it already holds.
 type Journal interface {
 	Save(ctx context.Context, rec Record) error
 	Load(ctx context.Context, investigationID string) (Record, bool, error)
 }
 
-// PGJournal stores records in CockroachDB.
+// records in CockroachDB
 type PGJournal struct {
 	Pool *pgxpool.Pool
 }
 
 var _ Journal = (*PGJournal)(nil)
 
-// create the table if it is not there yet, the way crdbvector does for its own.
-// Returns an error rather than logging: the caller decides whether to run
-// without durability, and silently degrading is how you find out months later.
+// creates the table if missing, returning an error rather than logging: the
+// caller decides whether to run without durability
 func NewPGJournal(ctx context.Context, pool *pgxpool.Pool) (*PGJournal, error) {
 	if pool == nil {
 		return nil, errors.New("worker: journal needs a database pool")
@@ -93,17 +87,9 @@ func (j *PGJournal) Save(ctx context.Context, rec Record) error {
 // what a run left at "running" by a dead process is recorded as.
 const abandonedReason = "abandoned: the process running this investigation exited before it finished"
 
-// AbandonStale marks investigations that outlived any possible run as failed.
-//
-// A row stays at "running" when the process holding it exits, because the only
-// code that would overwrite it died with that process. olderThan should be the
-// longest a run could legitimately take, so anything past it cannot still be in
-// flight — which is what makes this safe to run while a second process is
-// polling the same queue.
-//
-// Recovery is not this function's job: Seen lets the SQS redelivery
-// re-investigate, and a sweep at boot would only race it. This exists so
-// nothing reports a dead run as live.
+// marks investigations that outlived any possible run as failed. olderThan
+// should be the longest a run could legitimately take, which is what makes this
+// safe beside a second process; recovery is Seen's job, not this one's.
 func (j *PGJournal) AbandonStale(ctx context.Context, olderThan time.Duration) (int64, error) {
 	const q = `
 		UPDATE ` + journalTable + `

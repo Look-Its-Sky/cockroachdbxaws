@@ -15,11 +15,8 @@ import (
 	"agent_space/utils"
 )
 
-// what the check writes into the checkout in build mode.
-//
-// A real file with real contents rather than a no-op, so the harness stage, the
-// diff stage and the working directory are all exercised: a diff that comes
-// back empty here means something is wrong that a `true` would have hidden.
+// a real file rather than a no-op, so the harness stage, the diff stage and the
+// working directory are all exercised and an empty diff means something is wrong
 const markerPath = "SRE_SANDBOX_CHECK.md"
 
 const markerContents = `# sandbox check
@@ -113,9 +110,8 @@ func buildScript(mode string, repo remediation.Repository, sha, files string) (s
 		// them: a Node service with no tests must not read as a failure here
 		expected := []string{"clone", "harness", "diff"}
 		if repo.SetupCommand != "" {
-			// payment's `npm ci` is the one command in the mapping that has to
-			// reach a registry, so it is the one most likely to fail in a way
-			// that must not pass silently
+			// the one command in the mapping that has to reach a registry, so
+			// the one most likely to fail in a way that must not pass silently
 			expected = append(expected, "setup")
 		}
 		if repo.BuildCommand != "" {

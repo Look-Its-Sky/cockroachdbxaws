@@ -121,10 +121,9 @@ func splitStatements(sql string) []string {
 		}
 
 		if c == '\'' {
-			// '' inside a string is an escaped quote, not a terminator. Decided
-			// by looking ahead rather than by remembering the previous
-			// character: the latter cannot tell an escaped quote from the empty
-			// literal '', and would leave the splitter stuck inside a string.
+			// '' inside a string is an escaped quote, decided by looking ahead:
+			// remembering the previous character cannot tell one from the empty
+			// literal '' and leaves the splitter stuck inside a string
 			if inString && i+1 < len(sql) && sql[i+1] == '\'' {
 				current.WriteString("''")
 				i++
@@ -186,7 +185,7 @@ func summarise(ctx context.Context, conn *pgx.Conn) {
 	fmt.Println("\nTables now present:")
 	for _, t := range tables {
 		var n int64
-		// Table names come from SHOW TABLES, not from user input.
+		// table names come from SHOW TABLES, not from user input
 		if err := conn.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %q", t)).Scan(&n); err != nil {
 			fmt.Printf("  %-28s ?\n", t)
 			continue

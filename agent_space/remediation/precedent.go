@@ -10,32 +10,21 @@ import (
 	"github.com/tmc/langchaingo/vectorstores"
 )
 
-// DecisionCollection is the collection decisions are embedded into.
-//
-// Separate from the incidents rather than tagged alongside them, because the
-// store's filters are equality-only: there is no way to say "not a decision",
-// so decisions sharing the incident collection would silently take slots away
-// from the incident history the agent recalls.
+// separate from the incidents rather than tagged alongside them: the store's
+// filters are equality-only, so decisions sharing a collection would silently
+// take recall slots from the incident history
 const DecisionCollection = "sre_decisions"
 
-// the metadata key a document is deleted by. A decision that is replaced has to
-// take its document with it, or the index keeps recalling a judgement that has
-// since been reversed.
+// the metadata key a document is deleted by, so a replaced decision takes its
+// document with it rather than being recalled after it was reversed
 const decisionIDKey = "decision_id"
 
-// MaxPrecedents is how many past decisions are put in front of a model at once.
-//
-// Small on purpose. These are opinions, and the more of them are quoted the
-// more the current evidence has to argue against; four incidents and two
-// precedents leaves the live fault as the loudest thing in the prompt.
+// how many past decisions go in front of a model at once, small on purpose:
+// these are opinions, and the live fault has to stay the loudest thing there
 const MaxPrecedents = 2
 
-// Precedents is the decision index: the collection documents go into, and the
-// pool needed to take one back out.
-//
-// Nil is a working value. Everything here degrades to doing nothing, the same
-// way a missing container runtime or queue does — a decision that cannot be
-// indexed is still recorded, and the pipeline is unchanged.
+// the decision index: the collection documents go into and the pool to take one
+// back out. Nil is a working value; an unindexed decision is still recorded.
 type Precedents struct {
 	store vectorstores.VectorStore
 	pool  *pgxpool.Pool
@@ -73,12 +62,8 @@ func (p *Precedents) Add(ctx context.Context, d Decision) error {
 	return nil
 }
 
-// Forget removes superseded decisions from the index.
-//
-// Done with SQL rather than through the store, which has no per-document
-// delete. Parameterised on the ids: the store's own filter path interpolates
-// values straight into the statement, which is safe for its constants and would
-// not be for these.
+// removes superseded decisions from the index, in SQL because the store has no
+// per-document delete; parameterised, unlike the store's interpolating filter
 func (p *Precedents) Forget(ctx context.Context, decisionIDs []string) error {
 	if p == nil || len(decisionIDs) == 0 {
 		return nil
@@ -91,7 +76,7 @@ func (p *Precedents) Forget(ctx context.Context, decisionIDs []string) error {
 	return nil
 }
 
-// Recall returns the documents of the most similar past decisions.
+// the documents of the most similar past decisions
 func (p *Precedents) Recall(ctx context.Context, query string, limit int) ([]string, error) {
 	if p == nil || strings.TrimSpace(query) == "" {
 		return nil, nil

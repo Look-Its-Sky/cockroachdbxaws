@@ -13,32 +13,28 @@ import (
 	"github.com/tmc/langchaingo/llms"
 )
 
-// Request is one investigation handed over for remediation.
+// one investigation handed over for remediation
 type Request struct {
 	InvestigationID string
 	IncidentID      string
 	ServiceID       string
-	// IncidentSummary is the prose the investigation was run against.
+	// the prose the investigation was run against
 	IncidentSummary string
-	// VerdictAnswer is what the agent concluded, in its own words.
+	// what the agent concluded, in its own words
 	VerdictAnswer string
-	// CommitSHA is the commit the verdict implicated. Empty means triage has
+	// the commit the verdict implicated; empty means triage has
 	// nothing to read, which it reports rather than guessing around.
 	CommitSHA string
 }
 
-// how long each kind of container may run.
-//
-// The read-only stages are a clone and some git plumbing, so they get minutes
-// rather than the quarter of an hour a build and a test suite need.
+// how long each kind of container may run; the read-only stages are a clone and
+// some git plumbing, so they need minutes rather than a build's quarter hour
 const (
 	inspectTimeout   = 6 * time.Minute
 	candidateTimeout = DefaultSandboxTimeout
 )
 
-// how long a whole remediation may take, however many candidates it fans out
-// to. Well clear of N candidates running concurrently at their own ceiling; it
-// exists so a job cannot occupy a slot forever.
+// how long a whole remediation may take, so a job cannot occupy a slot forever
 const jobTimeout = 45 * time.Minute
 
 // defaults for the pool. Two jobs at a time, three containers each, is six
@@ -47,37 +43,32 @@ const (
 	defaultJobConcurrency       = 2
 	defaultCandidateConcurrency = 3
 	defaultQueueDepth           = 32
-	// One repair round. The failures worth repairing are mechanical — a missing
-	// type conversion, an unused import — and a model that cannot fix its own
-	// compiler error when shown it once will not fix it on the fifth go, while
-	// every round costs a container and a model call per candidate.
+	// one round: a model that cannot fix its own compiler error when shown it
+	// once will not manage it on the fifth, and each round costs a container
 	defaultMaxRepairs = 1
 )
 
-// Runner turns a verdict into ranked, verified candidate fixes.
-//
-// It has its own bounded pool and is driven asynchronously on purpose. The SQS
-// worker handles one message at a time under a ten-minute run budget; a
-// remediation is N containers at fifteen minutes each, and doing that inline
-// would stop the queue being consumed while a detector keeps producing.
+// turns a verdict into ranked, verified candidate fixes. Asynchronous with its
+// own pool on purpose: doing N fifteen-minute containers inline would stop the
+// worker consuming the queue while a detector keeps producing.
 type Runner struct {
 	Repos   *Repositories
 	Sandbox Sandbox
 	Model   llms.Model
-	// Store persists outcomes. Nil keeps everything in memory, the way the
+	// persists outcomes; nil keeps everything in memory, the way the
 	// worker's journal is optional: durability is not worth refusing to run for.
 	Store *Solutions
-	// GitHubToken is only used to clone; a public repository needs none, and it
+	// only used to clone; a public repository needs none, and it
 	// never enters the sandbox for one.
 	GitHubToken string
-	// Precedents is what engineers decided on similar incidents. Nil proposes
+	// what engineers decided on similar incidents; nil proposes
 	// fixes exactly as it did before any decision was recorded.
 	Precedents *Precedents
 
 	Strategies           []Strategy
 	JobConcurrency       int
 	CandidateConcurrency int
-	// MaxRepairs bounds how many times a candidate is shown its own failure and
+	// how many times a candidate is shown its own failure and
 	// asked again. 0 uses defaultMaxRepairs; negative turns repair off.
 	MaxRepairs int
 
@@ -100,7 +91,7 @@ func (r *Runner) repository(ctx context.Context, serviceID string) (Repository, 
 	return r.Repos.Get(ctx, serviceID)
 }
 
-// Start brings up the pool. Safe to call more than once; only the first counts.
+// brings up the pool; safe to call more than once, only the first counts
 func (r *Runner) Start(ctx context.Context) {
 	r.started.Do(func() {
 		r.jobs = make(chan Request, defaultQueueDepth)
@@ -126,12 +117,9 @@ func (r *Runner) Start(ctx context.Context) {
 	})
 }
 
-// Enqueue hands an investigation over and returns immediately.
-//
-// It reports false when the queue is full or the investigation is already being
-// remediated. Both are ordinary: the caller acknowledges its message either
-// way, because a dropped remediation must never cost a verdict that was already
-// paid for and persisted.
+// hands an investigation over and returns immediately, false when the pool is
+// full or it is already running; the caller acks either way, since a dropped
+// remediation must not cost a verdict already paid for
 func (r *Runner) Enqueue(req Request) bool {
 	if r == nil || r.jobs == nil {
 		return false
@@ -163,11 +151,8 @@ func (r *Runner) runJob(ctx context.Context, req Request) {
 		req.InvestigationID, outcome.Status, len(outcome.Candidates))
 }
 
-// Run remediates one investigation synchronously.
-//
-// It returns an Outcome rather than an error: every failure here is something
-// an engineer needs to read next to the incident, so it is recorded on the
-// outcome and persisted rather than thrown.
+// remediates one investigation synchronously, returning an Outcome rather than
+// an error: every failure here is something to read next to the incident
 func (r *Runner) Run(ctx context.Context, req Request) Outcome {
 	outcome := Outcome{
 		InvestigationID: req.InvestigationID,
@@ -235,12 +220,9 @@ func (r *Runner) Run(ctx context.Context, req Request) Outcome {
 	return r.finish(ctx, outcome, RemediationDone, nil)
 }
 
-// what engineers decided on similar incidents.
-//
-// Queried on the incident prose plus what triage found, because that is what a
-// decision document leads with — a description of a fault, not a patch. Errors
-// are logged and dropped: past decisions make a fix better informed, they are
-// not a prerequisite for proposing one.
+// what engineers decided on similar incidents, queried on the incident prose
+// plus triage, since a decision document leads with a fault description.
+// Errors are dropped: precedent informs a fix, it is not a prerequisite.
 func (r *Runner) precedents(ctx context.Context, req Request, t Triage) []string {
 	if r.Precedents == nil {
 		return nil
@@ -294,11 +276,8 @@ func (r *Runner) triage(ctx context.Context, repo Repository, cloneURL string, r
 	return triage, sections, nil
 }
 
-// inspect reads the implicated files out of a fresh checkout, whole.
-//
-// A second clone, after triage has already made one. That is deliberate: the
-// gate exists to stop the expensive path, so nothing beyond the gate should be
-// paid for before it has passed.
+// reads the implicated files out of a fresh checkout, whole. A second clone
+// after triage's, deliberately: nothing past the gate is paid for before it passes.
 func (r *Runner) inspect(ctx context.Context, repo Repository, cloneURL, sha string, files []string) ([]Sourced, string, error) {
 	if len(files) == 0 {
 		return nil, "", errors.New("remediation: triage named no files to read")
@@ -374,10 +353,8 @@ func (r *Runner) candidate(ctx context.Context, repo Repository, cloneURL string
 		return c.failed("the model proposed no change: " + fallback(proposal.Summary, "it gave no reason"))
 	}
 
-	// Propose, verify, and — when the toolchain rejects it for a reason the
-	// model can act on — show it the output and go again. Bounded, because a
-	// model that cannot fix its own compiler error in one look will not fix it
-	// in five, and each round is a container.
+	// propose, verify, and show the model its own output when the toolchain
+	// rejects it for a reason it can act on
 	for attempt := 0; ; attempt++ {
 		apply, err := ApplyCommand(proposal.Edits)
 		if err != nil {

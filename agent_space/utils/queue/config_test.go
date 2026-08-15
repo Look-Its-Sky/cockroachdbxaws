@@ -68,10 +68,8 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	}
 }
 
-// Switching to real SQS is two edits, and the second one is a deletion. Forget
-// it and the override silently wins, so every call goes to a LocalStack that
-// may not even be running — a failure that reads as a broken queue rather than
-// a stale .env.
+// switching to real SQS is two edits and the second is a deletion; forget it
+// and every call goes to a LocalStack that may not be running
 func TestRealQueueURLIgnoresAStaleLocalStackEndpoint(t *testing.T) {
 	t.Setenv("SQS_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/000000000000/static-log-analysis")
 	t.Setenv("AWS_ENDPOINT_URL", "http://localhost:4566")

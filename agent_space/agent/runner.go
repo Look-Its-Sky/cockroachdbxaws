@@ -23,9 +23,8 @@ const (
 	// defaultSources is how many past incidents to recall, matching /ask.
 	defaultSources = 4
 
-	// how many past decisions to quote. Deliberately far fewer than incidents:
-	// these are opinions, and the more of them are in the prompt the more the
-	// live evidence has to argue against.
+	// far fewer than incidents: these are opinions, and each one is something
+	// the live evidence has to argue against
 	maxPrecedents = 2
 
 	// maxToolOutputChars caps what one tool result contributes to the next prompt
@@ -58,11 +57,8 @@ Two or three well-chosen queries are enough. When you have what you need, answer
 in prose. State the decision and the commit in the first sentence. Do not call a
 tool once you can answer.`
 
-// PrecedentSource recalls decisions this team made on similar incidents.
-//
-// An interface rather than the concrete type so this package does not depend on
-// the remediation half: the investigation runs perfectly well without one, and
-// nil means exactly the behaviour that existed before decisions were recorded.
+// recalls decisions this team made on similar incidents; an interface so this
+// package does not depend on the remediation half, and nil disables it
 type PrecedentSource interface {
 	Recall(ctx context.Context, query string, limit int) ([]string, error)
 }
@@ -73,7 +69,7 @@ type Runner struct {
 	Tools         []*mcp.Tool
 	MaxIterations int
 
-	// Precedents is what engineers decided last time. Nil disables it.
+	// what engineers decided last time; nil disables it
 	Precedents PrecedentSource
 
 	// tables read at boot, empty means the model discovers them itself
@@ -118,7 +114,7 @@ func (r *Runner) init() {
 	})
 }
 
-// Run answers a question, consulting past incidents and the live cluster.
+// answers a question, consulting past incidents and the live cluster
 func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, error) {
 	r.init()
 
@@ -232,11 +228,8 @@ func (r *Runner) recall(ctx context.Context, question string, limit int) ([]stri
 	return grounding, nil
 }
 
-// recallPrecedents pulls what engineers decided on similar incidents.
-//
-// Errors are logged and dropped rather than returned. Past decisions improve an
-// investigation; they are not required for one, and an index that is down must
-// not cost a verdict.
+// what engineers decided on similar incidents; errors are dropped, since
+// precedent improves an investigation but is not required for one
 func (r *Runner) recallPrecedents(ctx context.Context, question string) []string {
 	if r.Precedents == nil {
 		return nil
@@ -376,13 +369,9 @@ func assistantTurn(choice *llms.ContentChoice, calls []llms.ToolCall) llms.Messa
 	return llms.MessageContent{Role: llms.ChatMessageTypeAI, Parts: parts}
 }
 
-// buildPrompt frames the question with the recalled incidents, and with what
-// this team decided the last time something like it happened.
-//
-// The two are kept in separate sections and labelled differently on purpose.
-// Incidents are history; decisions are opinion, and a model given both without
-// being told which is which will treat a colleague's judgement as a fact about
-// the world.
+// frames the question with the recalled incidents and past decisions, in
+// separate labelled sections: incidents are history and decisions are opinion,
+// and a model told neither treats a colleague's judgement as fact.
 func buildPrompt(question string, grounding, precedents []string) string {
 	var b strings.Builder
 
