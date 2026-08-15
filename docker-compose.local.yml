@@ -1,0 +1,121 @@
+# Local development backing services. Fully offline: no CockroachDB Cloud
+# account, no API-billed model, no license key.
+#
+# The API is NOT built here — run it on the host with `go run .` from
+# ./agent_space. The LLM is not here either; point OPENAI_BASE_URL at whatever
+# OpenAI-compatible server you are running.
+#
+#   docker compose -f docker-compose.local.yml up -d
+#     CockroachDB + the self-hosted CockroachDB MCP Server. The default,
+#     because it exercises BOTH CockroachDB integrations: /store and /retrieve
+#     over the vector store, /tools and /agent over MCP.
+#
+#   docker compose -f docker-compose.local.yml up -d postgres
+#     PostgreSQL + pgvector instead. Naming the service activates its profile.
+#     Useful as a portability check — it proves crdbvector emits plain pgvector
+#     SQL — but there is NO MCP on this path, so /tools and /agent return 503.
+#     The CockroachDB MCP Server reads crdb_internal and speaks only to
+#     CockroachDB; it cannot be pointed at Postgres.
+#
+# Nothing here reads DATABASE_URL. Set it in .env for the host-side process, to
+# the published port of whichever database you started:
+#
+#   CockroachDB: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+#   PostgreSQL:  postgres://postgres:postgres@localhost:5432/agent_space?sslmode=disable
+#
+# Also set VECTOR_DIMENSIONS to your embedding model's native width (768 for
+# embeddinggemma-300m). Changing it later needs `go run ./cmd/nuke -mode=drop`,
+# because the vector column is sized at table-creation time.
+
+services:
+  # ── default: CockroachDB + MCP ─────────────────────────────────────────────
+  cockroach:
+    image: cockroachdb/cockroach:v26.2.5
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"
+      - "8090:8080" # DB Console; 8080 is left free for the host-side API
+    volumes:
+      - crdb-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "-e", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  mcp:
+    image: us-docker.pkg.dev/releases-prod/cockroachdb-mcp-server/cockroachdb-mcp-server:0.1.0
+    environment:
+      CRDB_DATABASE_URL: postgresql://root@cockroach:26257/defaultdb?sslmode=disable
+      # The server refuses a TLS-free database connection, and refuses to serve
+      # HTTP without TLS, unless both are opted into explicitly. Fine on a
+      # throwaway local cluster, never anywhere else.
+      CRDB_MCP_ALLOW_INSECURE_DB: "true"
+      CRDB_MCP_ALLOW_INSECURE_HTTP: "true"
+      CRDB_MCP_TRANSPORT: http
+      CRDB_MCP_HTTP_LISTEN_ADDR: 0.0.0.0:8443
+      # Minimum 16 characters — the server exits at boot if it is shorter.
+      CRDB_MCP_BEARER_TOKEN: ${LOCAL_MCP_TOKEN:-local-dev-token-insecure}
+      # Write tools are off by default. On here, so the agent can be exercised
+      # against a disposable cluster.
+      CRDB_MCP_ENABLE_WRITE_QUERIES: "true"
+    ports:
+      - "8443:8443"
+    depends_on:
+      cockroach:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── SQS, so the worker has a queue to poll ─────────────────────────────────
+  # The init script creates static-log-analysis and its dead-letter queue. The
+  # resulting URL matches the ARN the real producer sends, because LocalStack
+  # uses account 000000000000:
+  #   SQS_QUEUE_URL=http://localhost:4566/000000000000/static-log-analysis
+  #   AWS_ENDPOINT_URL=http://localhost:4566
+  #
+  # Credentials are still required by the SDK's signing, but not checked:
+  # AWS_ACCESS_KEY_ID=test and AWS_SECRET_ACCESS_KEY=test are enough.
+  localstack:
+    image: localstack/localstack:4
+    environment:
+      SERVICES: sqs
+      DEBUG: "0"
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./docker/localstack-init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── opt-in: PostgreSQL + pgvector ──────────────────────────────────────────
+  postgres:
+    profiles: ["pg"]
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent_space
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Creates the vector extension, which crdbvector skips on purpose:
+      # CockroachDB has the vector type built in and errors on CREATE EXTENSION.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_space"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  crdb-data:
+  pg-data:
