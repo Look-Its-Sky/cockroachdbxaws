@@ -1,0 +1,145 @@
+# OpenTelemetry Collector configuration for the static log analysis service.
+#
+# Two properties of this file are load-bearing and are covered by a test in
+# internal/collectorconfig. Changing either without changing that test is a
+# change to the delivery contract:
+#
+#   1. The sending queue is PERSISTENT. architecture.md makes the Collector queue
+#      the first of two durability layers, and a memory-only queue loses whatever
+#      it holds when the Collector restarts — which is exactly the moment it was
+#      supposed to protect.
+#
+#   2. Universal redaction runs BEFORE the queue. security.md: "Before the
+#      Collector persistent queue, universal policy removes authorization
+#      headers, cookies, passwords, API keys, JWTs, cloud credentials,
+#      connection-string passwords, and common private-key material." A
+#      persistent queue is a persistent layer, so a secret that reaches it has
+#      been written to disk on a host this service does not control.
+#
+# The service-aware second pass is not here. It runs inside the analysis service
+# before the journal, where the redaction policy version is part of the journal
+# manifest.
+
+extensions:
+  # The queue's durability is this extension. Without it, sending_queue is a
+  # bounded in-memory buffer and nothing survives a restart.
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+    # Compaction keeps the on-disk queue from growing without bound after a long
+    # outage has drained.
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/queue
+      max_transaction_size: 65536
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # First pass. Everything here must run before the exporter, because the
+  # exporter is where the persistent queue lives.
+  #
+  # These are structural deletions: whole attributes whose names identify them as
+  # credentials. Deleting is used rather than masking, because a masked value
+  # still tells an attacker the shape of what was there.
+  attributes/strip-credentials:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.proxy-authorization
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+      - key: http.response.header.set-cookie
+        action: delete
+      - key: http.request.header.x-api-key
+        action: delete
+      - key: aws.secret.access.key
+        action: delete
+      - key: password
+        action: delete
+      - key: passwd
+        action: delete
+      - key: secret
+        action: delete
+      - key: api_key
+        action: delete
+      - key: apikey
+        action: delete
+      - key: token
+        action: delete
+      - key: authorization
+        action: delete
+
+  # Content-based first pass over the log body, for credentials that arrive
+  # inside prose rather than as their own attribute.
+  #
+  # These patterns are deliberately conservative: this pass exists to keep
+  # secrets off the Collector's disk, not to be the redaction policy. The
+  # analysis service runs the service-aware policy and a final prohibited-content
+  # scan before anything is journaled.
+  transform/strip-secrets:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # Bearer and Basic authorization values.
+          - replace_pattern(body.string, "(?i)(bearer|basic)\\s+[A-Za-z0-9._~+/=-]+", "$$1 [REDACTED_AUTHORIZATION]")
+          # JSON web tokens anywhere in the text.
+          - replace_pattern(body.string, "eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}", "[REDACTED_JWT]")
+          # AWS access key identifiers.
+          - replace_pattern(body.string, "(AKIA|ASIA)[0-9A-Z]{16}", "[REDACTED_AWS_ACCESS_KEY_ID]")
+          # Connection-string passwords.
+          - replace_pattern(body.string, "(?i)([a-z0-9+.-]+://[^:/@\\s]+):[^@\\s]+@", "$$1:[REDACTED_PASSWORD]@")
+          # Assigned password, secret, token, and key values.
+          - replace_pattern(body.string, "(?i)\\b(password|passwd|secret|api[_-]?key|token)\\b\\s*[=:]\\s*\\S+", "$$1=[REDACTED]")
+          # PEM private key blocks.
+          - replace_pattern(body.string, "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]")
+
+  batch:
+    # Bounded so one batch stays comfortably inside the analysis service's
+    # compressed request limit.
+    send_batch_size: 512
+    send_batch_max_size: 1024
+    timeout: 5s
+
+exporters:
+  otlp/analysis:
+    endpoint: static-log-analysis:4317
+    compression: gzip
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      # This is what makes the queue a durability layer rather than a buffer.
+      storage: file_storage/queue
+      num_consumers: 4
+      # architecture.md sizes this at roughly 5-10 minutes of peak traffic.
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      # Never give up. A retryable failure that is eventually dropped is
+      # acknowledged-mandatory loss with extra steps; the analysis service is
+      # careful to report permanent failures as permanent, so anything still
+      # being retried here is something a retry can still fix.
+      max_elapsed_time: 0
+
+service:
+  extensions: [file_storage/queue]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      # Order matters: both redaction passes run before the exporter, and the
+      # exporter is where the persistent queue is.
+      processors: [attributes/strip-credentials, transform/strip-secrets, batch]
+      exporters: [otlp/analysis]
+  telemetry:
+    logs:
+      level: info

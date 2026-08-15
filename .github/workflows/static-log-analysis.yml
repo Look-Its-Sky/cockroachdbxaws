@@ -1,0 +1,103 @@
+name: static-log-analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: services/static-log-analysis
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    env:
+      BETTER_AUTH_SECRET: ci-only-secret-00000000000000000000000000000000
+      BETTER_AUTH_URL: http://localhost:3000
+      BETTER_AUTH_DATABASE_PATH: /tmp/static-log-analysis-dashboard-ci.sqlite
+    defaults:
+      run:
+        working-directory: services/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.13.0
+          cache: npm
+          cache-dependency-path: services/dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run auth:migrate
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+
+  # Fast gate: unit, fixture, and property tests. Runs on every change.
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: services/static-log-analysis/go.mod
+          cache-dependency-path: services/static-log-analysis/go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check generated Protobuf bindings
+        run: ./scripts/check-generated-proto.sh
+
+      - name: Vet
+        # Both tag sets: without the second pass, a mistake in an
+        # integration-tagged file is invisible until the integration job runs,
+        # and invisible entirely if that job is ever skipped.
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: Test
+        # UPDATE_GOLDEN is deliberately unset: a fixture must never be rewritten
+        # by the gate that is supposed to be checking it.
+        run: go test ./...
+
+      - name: Validate production deployment package
+        run: ./scripts/check-production-deployment.sh
+
+      - name: Check that nothing was regenerated
+        # Catches a golden fixture or generated file that was changed by the
+        # test run but not committed.
+        run: git diff --exit-code
+
+  # Storage and concurrency gate: real Pebble and real CockroachDB, race
+  # detector on. REQUIRE_DOCKER turns an unavailable container into a failure,
+  # so this job cannot silently degrade into skipped tests.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: services/static-log-analysis/go.mod
+          cache-dependency-path: services/static-log-analysis/go.sum
+
+      - name: Vet integration build
+        run: go vet -tags=integration ./...
+
+      - name: Test with race detector
+        env:
+          REQUIRE_DOCKER: "1"
+        # -p 1 is a resource bound, not a correctness workaround. Each test
+        # binary starts its own CockroachDB container for its whole run, so the
+        # default per-CPU package parallelism puts several of them on one runner
+        # at once, under the race detector. That has already killed a container
+        # mid-run and failed every remaining test with "connection refused",
+        # which reads like a storage bug and is not one. Serialized, the whole
+        # job is about six minutes.
+        run: go test -p 1 -race -tags=integration -timeout=20m ./...

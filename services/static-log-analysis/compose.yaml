@@ -1,0 +1,183 @@
+name: static-log-analysis
+
+services:
+  cockroachdb:
+    image: cockroachdb/cockroach:v26.2.5@sha256:771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282
+    # The image's convenience entrypoint intentionally confines --insecure to
+    # localhost. This stack is an isolated development network, so invoke the
+    # reviewed binary directly and expose SQL only to Compose peers and the
+    # explicitly published host port.
+    entrypoint: ["/cockroach/cockroach"]
+    command:
+      - start-single-node
+      - --insecure
+      - --advertise-addr=cockroachdb:26257
+      - --listen-addr=0.0.0.0:26257
+      - --http-addr=0.0.0.0:8080
+    ports:
+      - "127.0.0.1:${SLA_COCKROACH_SQL_PORT:-26257}:26257"
+      - "127.0.0.1:${SLA_COCKROACH_HTTP_PORT:-18080}:8080"
+    volumes:
+      - cockroach-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach sql --insecure --host=127.0.0.1:26257 --execute='SELECT 1' >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 60s
+
+  cockroach-init:
+    image: cockroachdb/cockroach:v26.2.5@sha256:771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        cockroach sql --insecure --host=cockroachdb:26257
+        --execute='CREATE DATABASE IF NOT EXISTS static_log_analysis'
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: static-log-analysis:local
+    depends_on:
+      cockroach-init:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/local/bin/log-analysis-migrate"]
+    environment:
+      STATIC_LOG_ANALYSIS_DATABASE_DSN: postgresql://root@cockroachdb:26257/static_log_analysis?sslmode=disable
+    restart: "no"
+
+  localstack:
+    image: localstack/localstack:4.0.3@sha256:17c2f79ca4e1f804eb912291a19713d4134806325ef0d21d4c1053161dfa72d0
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: ${SLA_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT_STRATEGY: path
+    ports:
+      - "127.0.0.1:${SLA_LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - ./deploy/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name static-log-analysis >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  static-log-analysis:
+    image: static-log-analysis:local
+    command:
+      - all
+      - -region=${SLA_REGION:-us-east-1}
+      - -tenant-id=${SLA_TENANT_ID:-local}
+      - -journal-dir=/var/lib/static-log-analysis/journal
+      - -journal-max-bytes=${SLA_JOURNAL_MAX_BYTES:-1073741824}
+      - -journal-min-free-bytes=${SLA_JOURNAL_MIN_FREE_BYTES:-67108864}
+      - -otlp-trust-source=static_local
+      - -otlp-source-account=${SLA_SOURCE_ACCOUNT:-local}
+      - -otlp-source-instance=${SLA_SOURCE_INSTANCE:-static-log-analysis-collector}
+      - -otlp-credential-identity=${SLA_CREDENTIAL_IDENTITY:-local-compose}
+      - -otlp-allowed-environments=${SLA_ALLOWED_ENVIRONMENTS:-${SLA_ENVIRONMENT:-development}}
+      - -otlp-allowed-services=${SLA_ALLOWED_SERVICES:-example-service}
+      - -otlp-grpc-listen=0.0.0.0:4317
+      - -otlp-http-listen=0.0.0.0:4318
+      - -admin-listen=0.0.0.0:9464
+    environment:
+      STATIC_LOG_ANALYSIS_DATABASE_DSN: postgresql://root@cockroachdb:26257/static_log_analysis?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - analysis-journal:/var/lib/static-log-analysis/journal
+    expose:
+      - "4317"
+      - "4318"
+    ports:
+      - "127.0.0.1:${SLA_ADMIN_PORT:-9464}:9464"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9464/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 45s
+
+  outbox:
+    image: static-log-analysis:local
+    command:
+      - outbox
+      - -region=${SLA_REGION:-us-east-1}
+      - -tenant-id=${SLA_TENANT_ID:-local}
+      - -worker-owner=compose-outbox
+      - -outbox-endpoint-url=http://localstack:4566
+      - -outbox-queue-url=http://localstack:4566/queue/${SLA_REGION:-us-east-1}/000000000000/static-log-analysis
+      - -outbox-dead-letter-queue-url=http://localstack:4566/queue/${SLA_REGION:-us-east-1}/000000000000/static-log-analysis-dlq
+      - -admin-listen=0.0.0.0:9464
+    environment:
+      STATIC_LOG_ANALYSIS_DATABASE_DSN: postgresql://root@cockroachdb:26257/static_log_analysis?sslmode=disable
+      AWS_REGION: ${SLA_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SLA_OUTBOX_ADMIN_PORT:-9465}:9464"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9464/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 45s
+
+  collector-volume-init:
+    image: alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mkdir -p /queue && chown -R 10001:10001 /queue"]
+    volumes:
+      - collector-queue:/queue
+    restart: "no"
+
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.157.0@sha256:f2f01157055a9b2aab9df7118e1f1c9abf345e99b23bc7a2bc791db374a7d0f6
+    command: ["--config=/etc/otelcol/config.yaml"]
+    depends_on:
+      collector-volume-init:
+        condition: service_completed_successfully
+      static-log-analysis:
+        condition: service_healthy
+    volumes:
+      - ./deploy/collector/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+      - collector-queue:/var/lib/otelcol/queue
+    ports:
+      - "${SLA_OTLP_BIND_ADDRESS:-127.0.0.1}:${SLA_OTLP_GRPC_PORT:-4317}:4317"
+      - "${SLA_OTLP_BIND_ADDRESS:-127.0.0.1}:${SLA_OTLP_HTTP_PORT:-4318}:4318"
+    networks:
+      default:
+      ingress:
+        aliases:
+          - static-log-analysis-collector
+    stop_grace_period: 45s
+
+networks:
+  ingress:
+    # A fixed name is the cross-repository contract. Consumer Compose projects
+    # join it as an external network and never depend on generated container or
+    # project names.
+    name: ${SLA_INGRESS_NETWORK:-static-log-analysis-ingress}
+
+volumes:
+  cockroach-data:
+  analysis-journal:
+  collector-queue:

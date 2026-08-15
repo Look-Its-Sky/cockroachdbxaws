@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package static_log_analysis.internal.v1;
+
+option go_package = "github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/gen/internalv1;internalv1";
+
+import "google/protobuf/timestamp.proto";
+
+// DurableNormalizedLog is the journal message. The envelope is explicit rather
+// than inferred from the nested payload, so tenant and classification checks
+// cannot disappear during serialization.
+message DurableNormalizedLog {
+  string schema_version = 1;
+  string message_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  string region = 4;
+  string tenant_id = 5;
+  string classification = 6;
+  string producer = 7;
+  string correlation_id = 8;
+  NormalizedLog log = 9;
+}
+
+// NormalizedLog is the redacted domain payload nested in the durable envelope.
+// Raw OTLP and diagnostic JSON are intentionally not representable here.
+message NormalizedLog {
+  string schema_version = 1;
+  string record_id = 2;
+  string record_id_version = 3;
+  string identity_quality = 4;
+  string batch_id = 5;
+  TrustedEnvelope source = 6;
+  string region = 7;
+  google.protobuf.Timestamp event_time = 8;
+  google.protobuf.Timestamp observed_time = 9;
+  bool timestamp_inferred = 10;
+  string timestamp_inference_reason = 11;
+  int32 severity_number = 12;
+  string severity_text = 13;
+  string severity_class = 14;
+  SafeValue body = 15;
+  string event_name = 16;
+  map<string, SafeValue> attributes = 17;
+  map<string, SafeValue> resource_attributes = 18;
+  map<string, SafeValue> scope_attributes = 19;
+  ServiceIdentity service = 20;
+  DeploymentIdentity deployment = 21;
+  CorrelationIdentity correlation = 22;
+  NormalizedException exception = 23;
+  RedactionMetadata redaction = 24;
+  RegionalLogReference raw_reference = 25;
+  bool observed_time_inferred = 26;
+  string observed_time_inference_reason = 27;
+}
+
+message TrustedEnvelope {
+  string source_type = 1;
+  string source_account = 2;
+  string region = 3;
+  repeated string allowed_environments = 4;
+  repeated string allowed_services = 5;
+  string source_instance = 6;
+  string credential_identity = 7;
+  google.protobuf.Timestamp received_at = 8;
+}
+
+message SafeValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    double double_value = 3;
+    bool bool_value = 4;
+    SafeMap map_value = 5;
+    SafeList list_value = 6;
+    string withheld_reason = 7;
+  }
+}
+
+message SafeMap { map<string, SafeValue> values = 1; }
+message SafeList { repeated SafeValue values = 1; }
+
+message ServiceIdentity {
+  string name = 1;
+  string namespace = 2;
+  string instance_id = 3;
+  string environment = 4;
+  string status = 5;
+}
+
+message DeploymentIdentity {
+  string id = 1;
+  string version = 2;
+  string status = 3;
+}
+
+message CorrelationIdentity { string trace_id = 1; string span_id = 2; }
+
+message StackFrame {
+  string function = 1;
+  string module = 2;
+  string file = 3;
+  bool in_application = 4;
+}
+
+message NormalizedException {
+  string type = 1;
+  string safe_message = 2;
+  repeated StackFrame stack_frames = 3;
+}
+
+message RedactionMetadata {
+  string policy_version = 1;
+  repeated string rule_ids = 2;
+  repeated string withheld_fields = 3;
+}
+
+message RegionalLogReference {
+  string source_type = 1;
+  string region = 2;
+  string locator = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+  string classification = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}

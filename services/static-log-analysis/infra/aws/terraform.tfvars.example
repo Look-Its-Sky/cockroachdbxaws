@@ -1,0 +1,24 @@
+region    = "us-east-2"
+tenant_id = "hackathon-production"
+
+# Pin this to the commit you want the EC2 instance to build.
+repository_ref = "Static-Log-Analysis"
+
+# The example creates a separate OpenTelemetry Demo host. Replace this
+# documentation-only address with the public /32 that may open the demo UI.
+deploy_demo       = true
+demo_ingress_cidr = "203.0.113.10/32"
+
+# Publicly reachable, but protected by a local Better Auth administrator login.
+# Point this hostname at instance_public_ip before installing dashboard auth.
+dashboard_enabled      = false
+dashboard_hostname     = "logs.example.com"
+dashboard_ingress_cidr = "0.0.0.0/0"
+
+# Add existing application log groups here when moving beyond the example.
+cloudwatch_sources = {}
+
+tags = {
+  Environment = "hackathon"
+  Project     = "application"
+}

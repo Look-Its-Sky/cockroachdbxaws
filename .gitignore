@@ -1,2 +1,19 @@
-*.env
-agent_space/agent_space
+# Go build and test output
+/services/*/bin/
+/services/*/coverage.out
+/services/*/coverage.html
+/services/*/.env
+
+# Editor and OS noise
+.DS_Store
+*.swp
+
+.env
+
+# Terraform local state and provider cache. Lock files remain versioned.
+**/.terraform/*
+**/terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
