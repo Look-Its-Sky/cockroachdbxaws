@@ -20,6 +20,11 @@ output "service_role_arn" {
   value = aws_iam_role.service.arn
 }
 
+output "agent_runtime_role_arn" {
+  description = "App Runner instance role that can consume only the assignment queue."
+  value       = aws_iam_role.agent_runtime.arn
+}
+
 output "start_session_command" {
   value = "aws ssm start-session --region ${var.region} --target ${aws_instance.service.id}"
 }

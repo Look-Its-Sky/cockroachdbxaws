@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,6 +53,13 @@ func TestParseAssignmentRejections(t *testing.T) {
 		{"missing incident id", `{"message_type":"agent.assignment.v1","investigation_id":"v","service_id":"s"}`},
 		{"missing investigation id", `{"message_type":"agent.assignment.v1","incident_id":"i","service_id":"s"}`},
 		{"missing service id", `{"message_type":"agent.assignment.v1","incident_id":"i","investigation_id":"v"}`},
+		{"unknown field", strings.TrimSuffix(sampleBody, "}") + `,"unexpected":true}`},
+		{"wrong schema version", strings.Replace(sampleBody, `"schema_version":"1.0"`, `"schema_version":"2.0"`, 1)},
+		{"wrong producer", strings.Replace(sampleBody, `"producer":"static-log-analysis"`, `"producer":"someone-else"`, 1)},
+		{"correlation mismatch", strings.Replace(sampleBody, `"correlation_id":"019fe42e-18e1-7936-8051-ce2536637167"`, `"correlation_id":"019fe42e-18e1-7936-8051-ce2536637168"`, 1)},
+		{"invalid classification", strings.Replace(sampleBody, `"classification":"SENSITIVE"`, `"classification":"SECRET"`, 1)},
+		{"invalid severity", strings.Replace(sampleBody, `"severity":"error"`, `"severity":"urgent"`, 1)},
+		{"trailing json", sampleBody + `{}`},
 	}
 
 	for _, tc := range tests {
@@ -64,6 +72,57 @@ func TestParseAssignmentRejections(t *testing.T) {
 			// a malformed message would loop until the DLQ took it
 			if !errors.Is(err, ErrPermanent) {
 				t.Errorf("error is not ErrPermanent: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseMessagePinsTransportMetadataAndConfiguredScope(t *testing.T) {
+	message := Message{
+		MessageID: "aws-transport-id",
+		Body:      sampleBody,
+		MessageAttributes: map[string]string{
+			"message_id":        "019fe42e-18e1-7937-8c97-4be21ad3b984",
+			"deduplication_key": "assignment:019fe42e-18e1-7936-8051-ce2536637167",
+			"message_type":      AssignmentType,
+			"region":            "us-east-1",
+		},
+	}
+	boundary := Boundary{Region: "us-east-1", TenantID: "local", Classification: "SENSITIVE"}
+
+	if _, err := ParseMessage(message, boundary); err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Message, *Boundary)
+		wantErr error
+	}{
+		{"missing required attribute", func(m *Message, _ *Boundary) { delete(m.MessageAttributes, "region") }, ErrPermanent},
+		{"additional attribute", func(m *Message, _ *Boundary) { m.MessageAttributes["extra"] = "value" }, ErrPermanent},
+		{"message id mismatch", func(m *Message, _ *Boundary) {
+			m.MessageAttributes["message_id"] = "019fe42e-18e1-7937-8c97-4be21ad3b985"
+		}, ErrPermanent},
+		{"dedup mismatch", func(m *Message, _ *Boundary) { m.MessageAttributes["deduplication_key"] = "assignment:other" }, ErrPermanent},
+		{"type mismatch", func(m *Message, _ *Boundary) { m.MessageAttributes["message_type"] = "agent.assignment.v2" }, ErrPermanent},
+		{"attribute region mismatch", func(m *Message, _ *Boundary) { m.MessageAttributes["region"] = "us-west-2" }, ErrPermanent},
+		{"configured region mismatch", func(_ *Message, b *Boundary) { b.Region = "us-west-2" }, ErrConfiguration},
+		{"configured tenant mismatch", func(_ *Message, b *Boundary) { b.TenantID = "another" }, ErrConfiguration},
+		{"configured classification mismatch", func(_ *Message, b *Boundary) { b.Classification = "INTERNAL" }, ErrConfiguration},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := message
+			candidate.MessageAttributes = make(map[string]string, len(message.MessageAttributes))
+			for key, value := range message.MessageAttributes {
+				candidate.MessageAttributes[key] = value
+			}
+			candidateBoundary := boundary
+			tc.mutate(&candidate, &candidateBoundary)
+			if _, err := ParseMessage(candidate, candidateBoundary); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
 			}
 		})
 	}

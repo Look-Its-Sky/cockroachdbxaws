@@ -1,4 +1,5 @@
 import { headers } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { canViewDashboard } from "@/lib/authorization";
@@ -6,6 +7,8 @@ import { getDashboardOverview } from "@/lib/overview";
 import { MetricCard, StatusPill } from "@/components/status";
 import { RefreshControl } from "@/components/refresh";
 import { SignOut } from "@/components/sign-out";
+import { recommendationLabel, type AgentInvestigationState } from "@/lib/agent";
+import { getReleaseIdentity } from "@/lib/release";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +20,24 @@ function time(value: string): string {
   return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(value));
 }
 
+function agentStatus(state: AgentInvestigationState | undefined): string {
+  if (!state) return "not checked";
+  if (!state.available) return state.reason;
+  return state.value?.status ?? "no agent record";
+}
+
+function verdict(state: AgentInvestigationState | undefined): string {
+  if (!state?.available || !state.value) return "—";
+  return recommendationLabel(state.value);
+}
+
 export default async function DashboardPage() {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) redirect("/sign-in");
   if (!canViewDashboard(session)) redirect("/unauthorized");
 
   const overview = await getDashboardOverview();
+  const release = getReleaseIdentity();
   const analysis = overview.analysis.available ? overview.analysis.value : null;
   const queues = overview.queues.available ? overview.queues.value : null;
   const metrics = overview.cloudwatch.available ? overview.cloudwatch.value.metrics : {};
@@ -39,6 +54,7 @@ export default async function DashboardPage() {
           <span>Operations overview</span>
         </div>
         <div className="top-actions">
+          <Link className="nav-link" href="/remediations">Remediations</Link>
           <RefreshControl />
           <SignOut />
         </div>
@@ -55,6 +71,7 @@ export default async function DashboardPage() {
           <StatusPill healthy={overview.outbox.available && overview.outbox.value.ready} label="Outbox worker" />
           <StatusPill healthy={overview.analysis.available} label="CockroachDB" />
           <StatusPill healthy={overview.queues.available && (queues?.deadLetter ?? 1) === 0} label="Agent queue" />
+          <StatusPill healthy={overview.agent.available && overview.agent.value.ready} label="Agent runtime" />
         </div>
       </section>
 
@@ -74,16 +91,21 @@ export default async function DashboardPage() {
           {analysis?.recent_investigations.length ? (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Service</th><th>Trigger</th><th>Status</th><th>Queued</th></tr></thead>
+                <thead><tr><th>Service</th><th>Signal</th><th>Detection</th><th>Agent</th><th>Recommendation</th><th>Queued</th></tr></thead>
                 <tbody>
-                  {analysis.recent_investigations.map((item) => (
+                  {analysis.recent_investigations.map((item) => {
+                    const run = overview.agentInvestigations[item.investigation_id];
+                    return (
                     <tr key={item.investigation_id}>
-                      <td><strong>{item.service}</strong><span>{item.environment} · {item.severity}</span></td>
-                      <td>{item.trigger_reason.replaceAll("_", " ")}</td>
+                      <td><Link className="investigation-link" href={`/investigations/${item.investigation_id}`}>{item.service}</Link><span>{item.environment}</span></td>
+                      <td><strong className="severity-label">{item.severity}</strong><span>{item.trigger_reason.replaceAll("_", " ")}</span></td>
                       <td><span className="state-tag">{item.state}</span></td>
+                      <td><span className={`state-tag state-${agentStatus(run).replaceAll(" ", "-")}`}>{agentStatus(run)}</span></td>
+                      <td><strong>{verdict(run)}</strong></td>
                       <td>{time(item.queued_at)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -102,7 +124,7 @@ export default async function DashboardPage() {
         </aside>
       </section>
 
-      <footer>Last checked {time(overview.collectedAt)} · UTC · Content-safe operational metadata only</footer>
+      <footer title={release?.commit}>Release {release?.shortCommit ?? "unidentified"} · Last checked {time(overview.collectedAt)} · UTC · Content-safe operational metadata only</footer>
     </main>
   );
 }

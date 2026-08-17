@@ -92,8 +92,15 @@ func (w *Worker) Run(ctx context.Context) {
 // one message, start to finish. Every path either acknowledges the message or
 // deliberately leaves it for redelivery; there is no path that does neither.
 func (w *Worker) handle(ctx context.Context, msg queue.Message) {
-	a, err := queue.ParseAssignment(msg.Body)
+	a, err := queue.ParseMessage(msg, w.Config.Boundary())
 	if err != nil {
+		if errors.Is(err, queue.ErrConfiguration) {
+			log.Printf("worker: assignment conflicts with the configured boundary; leaving for redelivery: %v", err)
+			if a.InvestigationID != "" {
+				w.Results.Retry(a, err.Error())
+			}
+			return
+		}
 		// a body that will not parse now will not parse in five minutes
 		log.Printf("worker: dropping unusable message %s: %v", msg.MessageID, err)
 		if a.InvestigationID != "" {
@@ -144,6 +151,9 @@ func (w *Worker) handle(ctx context.Context, msg queue.Message) {
 	// derived from the worker's context, never from a request: a run must not
 	// die because whoever asked for it went away
 	runCtx, cancelRun := context.WithTimeout(ctx, w.Config.RunTimeout)
+	runCtx = agent.WithProgress(runCtx, func(event agent.Progress) {
+		w.Results.Progress(a, event)
+	})
 	res, runErr := w.Agent.Run(runCtx, incident.BuildQuestion(a, inc), w.Sources)
 	cancelRun()
 	stopHeartbeat()

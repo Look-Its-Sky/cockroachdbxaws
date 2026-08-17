@@ -103,6 +103,9 @@ services:
       CLOUDWATCH_HEALTH_URL: http://cloudwatch:9464/readyz
       CLOUDWATCH_METRICS_URL: http://cloudwatch:9464/metrics
       OUTBOX_HEALTH_URL: http://outbox:9464/readyz
+      AGENT_API_URL: ${AGENT_API_URL:-}
+      AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
+      SLA_RELEASE_SHA: ${SLA_REPOSITORY_REF:-}
     depends_on:
       cloudwatch:
         condition: service_healthy

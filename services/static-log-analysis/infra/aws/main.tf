@@ -173,6 +173,46 @@ resource "aws_iam_role_policy" "service" {
   policy = data.aws_iam_policy_document.service.json
 }
 
+# The agent is deployed separately from the analysis host. Its App Runner task
+# can consume committed assignments, but cannot publish, inspect the DLQ, or
+# access CloudWatch. Database access is configured independently at runtime.
+data "aws_iam_policy_document" "agent_runtime_trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["tasks.apprunner.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "agent_runtime" {
+  name               = "${var.name}-agent-runtime"
+  assume_role_policy = data.aws_iam_policy_document.agent_runtime_trust.json
+  tags               = merge(local.tags, { DeploymentRole = "agent-runtime" })
+}
+
+data "aws_iam_policy_document" "agent_runtime" {
+  statement {
+    sid    = "ConsumeInvestigationAssignments"
+    effect = "Allow"
+    actions = [
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:ChangeMessageVisibility",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [aws_sqs_queue.assignments.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_runtime" {
+  name   = "consume-static-analysis-assignments"
+  role   = aws_iam_role.agent_runtime.id
+  policy = data.aws_iam_policy_document.agent_runtime.json
+}
+
 resource "aws_security_group" "service" {
   name_prefix = "${var.name}-"
   description = "No inbound access; administration uses SSM Session Manager"

@@ -122,6 +122,9 @@ func (a *fakeAgent) callCount() int {
 func testConfig() queue.Config {
 	return queue.Config{
 		QueueURL:          "http://localhost:4566/000000000000/static-log-analysis",
+		Region:            "us-east-1",
+		TenantID:          "local",
+		Classification:    "SENSITIVE",
 		VisibilityTimeout: 90 * time.Millisecond, // heartbeats every 30ms
 		WaitTime:          time.Millisecond,
 		RunTimeout:        5 * time.Second,
@@ -140,7 +143,10 @@ func message(body string, receiveCount int) queue.Message {
 		Body:          body,
 		Attributes:    map[string]string{"ApproximateReceiveCount": fmt.Sprint(receiveCount)},
 		MessageAttributes: map[string]string{
+			"message_id":        "019fe42e-18e1-7937-8c97-4be21ad3b984",
 			"deduplication_key": "assignment:" + sampleInvestigation,
+			"message_type":      queue.AssignmentType,
+			"region":            "us-east-1",
 		},
 	}
 }
@@ -236,6 +242,25 @@ func TestHandleMalformedBodyIsDropped(t *testing.T) {
 	// retrying cannot fix it, so it must not be left to cycle into a DLQ
 	if q.deletedCount() != 1 {
 		t.Errorf("message deleted %d times, want 1", q.deletedCount())
+	}
+}
+
+func TestHandleConfiguredScopeMismatchPreservesMessage(t *testing.T) {
+	q := &fakeQueue{}
+	a := &fakeAgent{}
+	w := newWorker(q, fakeResolver{ctx: resolvedContext()}, a)
+	w.Config.TenantID = "misconfigured-tenant"
+
+	w.handle(context.Background(), message(sampleBody, 1))
+
+	if a.callCount() != 0 {
+		t.Errorf("agent ran %d times, want 0", a.callCount())
+	}
+	if q.deletedCount() != 0 {
+		t.Errorf("configuration mismatch deleted %d messages, want 0", q.deletedCount())
+	}
+	if rec, ok := w.Results.Get(sampleInvestigation); !ok || rec.Status != StatusRetrying {
+		t.Errorf("retry record: ok=%v status=%q, want %q", ok, rec.Status, StatusRetrying)
 	}
 }
 

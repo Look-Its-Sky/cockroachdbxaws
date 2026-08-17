@@ -43,6 +43,13 @@ func TestAWSComposeRunsOnlyTheCloudWatchProductionPath(t *testing.T) {
 	}
 }
 
+func TestLocalComposeCanSelectAFreshJournalWithoutDeletingTheOldVolume(t *testing.T) {
+	compose := readProductionFile(t, "compose.yaml")
+	if !strings.Contains(compose, `name: ${SLA_ANALYSIS_JOURNAL_VOLUME:-static-log-analysis_analysis-journal}`) {
+		t.Fatal("local Compose cannot select a fresh named journal volume for a bounded smoke deployment")
+	}
+}
+
 func TestAWSInfrastructureSeparatesPrivateAnalysisFromOptionalDemo(t *testing.T) {
 	main := readProductionFile(t, "infra/aws/main.tf")
 	for _, required := range []string{
@@ -207,6 +214,12 @@ func TestAWSServiceRestartDoesNotRedeploySource(t *testing.T) {
 
 func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) {
 	main := readProductionFile(t, "infra/aws/main.tf")
+	servicePolicy := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "service"`,
+		`resource "aws_iam_role_policy" "service"`,
+	)
 	compose := readProductionFile(t, "deploy/aws/compose.yaml")
 	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
 	caddy := readProductionFile(t, "deploy/aws/Caddyfile")
@@ -222,7 +235,7 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 		}
 	}
 	for _, forbidden := range []string{`sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`} {
-		if strings.Contains(main, forbidden) {
+		if strings.Contains(servicePolicy, forbidden) {
 			t.Errorf("dashboard can mutate the assignment queue through %q", forbidden)
 		}
 	}
@@ -236,6 +249,9 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 		"BETTER_AUTH_SECRET",
 		"BETTER_AUTH_DATABASE_PATH",
 		"ANALYSIS_OVERVIEW_URL",
+		"AGENT_API_URL",
+		"AGENT_API_TOKEN",
+		"SLA_RELEASE_SHA",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("production Compose does not contain %q", required)
@@ -289,6 +305,46 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 			if strings.Contains(contents, forbidden) {
 				t.Errorf("%s still contains obsolete hosted-auth setting %q", file, forbidden)
 			}
+		}
+	}
+}
+
+func TestAgentRuntimeRoleCanOnlyConsumeAssignments(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	trust := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "agent_runtime_trust"`,
+		`resource "aws_iam_role" "agent_runtime"`,
+	)
+	if !strings.Contains(trust, `identifiers = ["tasks.apprunner.amazonaws.com"]`) {
+		t.Error("agent runtime role is not restricted to the App Runner task service")
+	}
+
+	policy := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "agent_runtime"`,
+		`resource "aws_iam_role_policy" "agent_runtime"`,
+	)
+	for _, required := range []string{
+		`"sqs:ReceiveMessage"`,
+		`"sqs:DeleteMessage"`,
+		`"sqs:ChangeMessageVisibility"`,
+		`"sqs:GetQueueAttributes"`,
+		`resources = [aws_sqs_queue.assignments.arn]`,
+	} {
+		if !strings.Contains(policy, required) {
+			t.Errorf("agent runtime policy does not contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`"sqs:SendMessage"`,
+		`aws_sqs_queue.dead_letter.arn`,
+		`Resource = "*"`,
+	} {
+		if strings.Contains(policy, forbidden) {
+			t.Errorf("agent runtime policy contains over-broad capability %q", forbidden)
 		}
 	}
 }

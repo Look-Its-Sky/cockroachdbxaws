@@ -79,9 +79,19 @@ CloudWatch Logs access.
 terraform init
 terraform fmt -check
 terraform validate
+deployment_workspace="account-$(aws sts get-caller-identity --query Account --output text)"
+terraform workspace select "$deployment_workspace"
+terraform workspace show
 terraform plan -out=static-log-analysis.tfplan
 terraform apply static-log-analysis.tfplan
 ```
+
+Use one account-specific workspace and verify it before every plan or apply.
+Never continue from an empty `default` workspace when this account already has
+a deployment: Terraform would treat the existing resources as unmanaged and
+propose duplicates. If the account workspace does not exist, stop and look for
+the prior state before creating it. Only a confirmed first deployment may run
+`terraform workspace new "$deployment_workspace"`.
 
 This creates the outbound-only analysis instance, its stable Elastic IP and
 least-privilege IAM profile, the assignment and dead-letter queues, and—when

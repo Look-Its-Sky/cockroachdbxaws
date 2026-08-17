@@ -1,0 +1,38 @@
+# Linux-only agent overlay for a model server bound to host loopback.
+# Start the static stack and the agent-db-init/agent-mcp services from
+# compose.local-integration.yaml first. This container deliberately receives
+# neither the Docker socket nor remediation authority.
+
+name: agent-local-models
+
+services:
+  agent:
+    build:
+      context: ./agent_space
+      dockerfile: Dockerfile
+    image: agent-space:local-integration
+    env_file:
+      - path: .env.agent-local
+        required: false
+    environment:
+      OPENAI_BASE_URL: http://127.0.0.1:11434/v1
+      EMBEDDING_BASE_URL: http://127.0.0.1:11434/v1
+      DATABASE_URL: postgresql://root@127.0.0.1:26257/agent_space?sslmode=disable
+      ANALYSIS_DATABASE_URL: postgresql://agent_context_reader@127.0.0.1:26257/static_log_analysis?sslmode=disable
+      SQS_QUEUE_URL: http://127.0.0.1:4566/queue/${SLA_REGION:-us-east-1}/000000000000/static-log-analysis
+      AWS_ENDPOINT_URL: http://127.0.0.1:4566
+      AWS_REGION: ${SLA_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AGENT_TENANT_ID: ${SLA_TENANT_ID:-local}
+      AGENT_CLASSIFICATION: SENSITIVE
+      COCKROACH_MCP_URL: http://127.0.0.1:${AGENT_MCP_PORT:-18443}
+      COCKROACH_API_KEY: local-agent-mcp-token
+      COCKROACH_CLUSTER_ID: ""
+      AGENT_ALLOW_WRITE_TOOLS: "false"
+      API_TOKEN: ${API_TOKEN:-local-agent-token}
+      CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      REMEDIATION_ENABLED: "false"
+      PORT: ${AGENT_API_PORT:-18081}
+    network_mode: host
+    restart: unless-stopped

@@ -12,6 +12,9 @@ services/    deployable components, one Go module each
 - [Static Log Analysis Service documentation](docs/static-log-analysis/README.md)
 - [Static Log Analysis Service code](services/static-log-analysis/)
 - [Single AWS deployment guide](docs/static-log-analysis/deployment.md)
+- [Combined platform deployment and dashboard plan](docs/platform-deployment-plan.md)
+- [Agent SQS integration and deployment plan](docs/agent-sqs-deployment.md)
+- [Local GPU model and agent runbook](docs/deployment/local-model-hosting.md)
 - [AWS EC2 infrastructure module](services/static-log-analysis/infra/aws/README.md)
 - [Working in this repository](AGENTS.md) — current progress, gates, and conventions
 

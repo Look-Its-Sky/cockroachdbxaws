@@ -88,6 +88,42 @@ projection, unlabelled metrics, readiness, and SQS queue attributes, has no
 CockroachDB credential, and stays in an optional Compose profile so dashboard
 configuration cannot block analysis startup.
 
+The dashboard's local agent slice now distinguishes recommendations from
+executed remediation, includes bounded repository/remediation list and detail
+views, and renders a durable maximum-50-event categorical progress timeline.
+The agent keeps read-only remediation history available while execution is
+forced off; mutation routes remain unavailable without an initialized sandbox.
+
+The dashboard now also has the first Phase 5 agent read model: its server calls
+authenticated `/ping` and `/agent/:id`, correlates at most ten recent detector
+investigations with agent state, and renders a detail page containing only safe
+signal metadata, verdict/timing counts, and a stripped tool-name trace. Model
+prose, tool inputs/output, context, provider errors, and the agent token never
+reach the browser. Repository/remediation visibility and all mutations remain
+unfinished.
+
+The approved investigation-only agent integration is implemented but not yet
+deployed to AWS. `agent_space` now strictly admits the closed assignment envelope and
+exact SQS attributes against a trusted region/tenant/classification boundary,
+then reads the immutable `SafeValue` snapshot through a distinct read-only
+analysis database connection. Terraform provides an exact-queue App Runner
+consumer role, and the agent deployer pins one instance and forces remediation
+off. Database grants, Terraform apply, App Runner deployment, and end-to-end
+release evidence remain operator work; see `docs/agent-sqs-deployment.md`.
+
+Local integration is available through `compose.local-integration.yaml`. It
+joins the static-analysis Compose network, creates a separate agent database
+and a context-reader user limited to the three safe projection tables, binds
+the API to loopback port 18081, and forces remediation off without mounting the
+Docker socket. The detector-to-SQS-to-live-context path is demonstrated. A
+GPU-backed local run using `qwen2.5-coder:14b-instruct` and
+`nomic-embed-text` also completed and persisted a one-iteration `ROLLBACK`
+verdict. `compose.local-models.yaml` is the loopback-only Linux overlay for
+hosts whose firewall drops Docker bridge traffic. Automatic remediation is
+still unproven and remains disabled. See
+`docs/deployment/local-agent-integration-readiness.md` and
+`docs/deployment/local-model-hosting.md`.
+
 The AWS CloudWatch pull path is the combined `cloudwatch` role. Its poll and
 process workers share one journal, checkpoints live on a second Docker volume,
 and the EC2 instance profile grants exact-log-group `logs:FilterLogEvents` plus

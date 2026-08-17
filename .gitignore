@@ -9,6 +9,8 @@
 *.swp
 
 .env
+.env.agent-local
+.local/
 
 # Terraform local state and provider cache. Lock files remain versioned.
 **/.terraform/*

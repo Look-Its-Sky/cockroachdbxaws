@@ -125,14 +125,17 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 		limit = defaultSources
 	}
 
+	ReportProgress(ctx, Progress{Stage: ProgressContext, Status: ProgressStarted})
 	grounding, err := r.recall(ctx, question, limit)
 	if err != nil {
+		ReportProgress(ctx, Progress{Stage: ProgressContext, Status: ProgressFailed})
 		return Result{}, err
 	}
 
 	// past decisions are a bonus, never a prerequisite: an index that is missing
 	// or unreachable must not stop an incident being investigated
 	precedents := r.recallPrecedents(ctx, question)
+	ReportProgress(ctx, Progress{Stage: ProgressContext, Status: ProgressCompleted})
 
 	result := Result{Sources: len(grounding), Grounding: grounding, Precedents: precedents}
 	messages := []llms.MessageContent{
@@ -143,16 +146,20 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 	for i := 1; i <= r.MaxIterations; i++ {
 		result.Iterations = i
 
+		ReportProgress(ctx, Progress{Stage: ProgressModel, Status: ProgressStarted, Iteration: i})
 		resp, err := r.Model.GenerateContent(ctx, messages,
 			llms.WithTools(r.specs),
 			llms.WithMaxTokens(completionBudget),
 		)
 		if err != nil {
+			ReportProgress(ctx, Progress{Stage: ProgressModel, Status: ProgressFailed, Iteration: i})
 			return result, fmt.Errorf("agent: generate: %w", err)
 		}
 		if len(resp.Choices) == 0 {
+			ReportProgress(ctx, Progress{Stage: ProgressModel, Status: ProgressFailed, Iteration: i})
 			return result, errors.New("agent: model returned no choices")
 		}
+		ReportProgress(ctx, Progress{Stage: ProgressModel, Status: ProgressCompleted, Iteration: i})
 
 		choice := resp.Choices[0]
 		calls := toolCalls(choice)
@@ -163,14 +170,29 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 				answer = "The model returned no answer (stop reason: " + choice.StopReason + ")."
 			}
 			result.setAnswer(answer)
+			ReportProgress(ctx, Progress{Stage: ProgressVerdict, Status: ProgressCompleted, Iteration: i})
 			return result, nil
 		}
 
 		// echo the tool-call turn back or the results have no tool_call_id to attach to
 		messages = append(messages, assistantTurn(choice, calls))
 
+		for _, call := range calls {
+			tool := ""
+			if call.FunctionCall != nil {
+				tool = call.FunctionCall.Name
+			}
+			ReportProgress(ctx, Progress{Stage: ProgressTool, Status: ProgressStarted, Iteration: i, Tool: tool})
+		}
 		steps, err := r.execute(ctx, i, calls)
 		result.Trace = append(result.Trace, steps...)
+		for _, step := range steps {
+			status := ProgressCompleted
+			if step.Failed {
+				status = ProgressFailed
+			}
+			ReportProgress(ctx, Progress{Stage: ProgressTool, Status: status, Iteration: i, Tool: step.Tool, Cause: step.Cause})
+		}
 		if err != nil {
 			// cluster is gone, return the trace with the error rather than a partial answer
 			return result, err
@@ -190,6 +212,7 @@ func (r *Runner) Run(ctx context.Context, question string, limit int) (Result, e
 	// out of iterations, a half-finished investigation is still evidence
 	result.Truncated = true
 	result.setAnswer(r.summarise(ctx, messages))
+	ReportProgress(ctx, Progress{Stage: ProgressVerdict, Status: ProgressCompleted, Iteration: result.Iterations})
 	return result, nil
 }
 

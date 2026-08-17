@@ -136,6 +136,47 @@ func TestRunAnswersWithoutTools(t *testing.T) {
 	}
 }
 
+func TestRunReportsOnlyBoundedCategoricalProgress(t *testing.T) {
+	model := &scriptedModel{responses: []*llms.ContentResponse{
+		toolResponse("call-1", "select_query", `{"query":"SELECT secret FROM private"}`),
+		textResponse("ROLLBACK. The implicated commit is a3f9c21."),
+	}}
+	runner, _ := newRunner(t, model, stubStore{})
+
+	var progress []Progress
+	ctx := WithProgress(t.Context(), func(event Progress) { progress = append(progress, event) })
+	if _, err := runner.Run(ctx, "Checkout is failing.", 1); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []struct {
+		stage  ProgressStage
+		status ProgressStatus
+		tool   string
+	}{
+		{ProgressContext, ProgressStarted, ""},
+		{ProgressContext, ProgressCompleted, ""},
+		{ProgressModel, ProgressStarted, ""},
+		{ProgressModel, ProgressCompleted, ""},
+		{ProgressTool, ProgressStarted, "select_query"},
+		{ProgressTool, ProgressCompleted, "select_query"},
+		{ProgressModel, ProgressStarted, ""},
+		{ProgressModel, ProgressCompleted, ""},
+		{ProgressVerdict, ProgressCompleted, ""},
+	}
+	if len(progress) != len(want) {
+		t.Fatalf("progress = %+v, want %d categorical events", progress, len(want))
+	}
+	for i, expected := range want {
+		if progress[i].Stage != expected.stage || progress[i].Status != expected.status || progress[i].Tool != expected.tool {
+			t.Errorf("progress[%d] = %+v, want stage=%s status=%s tool=%s", i, progress[i], expected.stage, expected.status, expected.tool)
+		}
+		if progress[i].At.IsZero() {
+			t.Errorf("progress[%d] has no timestamp", i)
+		}
+	}
+}
+
 func TestRunExecutesToolCallThenAnswers(t *testing.T) {
 	model := &scriptedModel{responses: []*llms.ContentResponse{
 		toolResponse("call-1", "select_query", `{"query": "SELECT count(*) FROM incidents"}`),

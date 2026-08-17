@@ -53,7 +53,10 @@ type Result struct {
 	// past decisions this team recorded on similar incidents, kept separate
 	// from Grounding because they are opinion rather than history
 	Precedents []string `json:"precedents,omitempty"`
-	Truncated  bool     `json:"truncated"`
+	// bounded categorical progress, persisted while the run is active; unlike
+	// Trace it never contains arguments, output, model prose, or errors
+	Progress  []Progress `json:"progress,omitempty"`
+	Truncated bool       `json:"truncated"`
 }
 
 // record the model's answer, splitting the machine-readable verdict off the
