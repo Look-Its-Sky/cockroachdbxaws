@@ -63,12 +63,17 @@ cp terraform.tfvars.example terraform.tfvars
 Edit only `terraform.tfvars`. Set:
 
 - the AWS region and tenant identity;
+- the exact Amazon Linux 2023 x86_64 AMI already approved for that region;
 - a pushed branch, tag, or commit in `repository_ref`;
 - every CloudWatch log group and its trusted service/environment identity;
 - the account number inside each exact log-group ARN.
 
 The module rejects cross-account, cross-region, duplicate, wildcard, or
 ambiguous log-group declarations.
+The AMI is deliberately pinned. Changing `machine_image_id` replaces both EC2
+hosts and can delete their local journal, checkpoints, and dashboard-auth
+database, so an application release must leave it unchanged. Treat an AMI
+upgrade as a separate host-migration change with backups and explicit review.
 The generated IAM policy grants `logs:FilterLogEvents` to each exact configured
 log group plus its required `:*` stream suffix; it does not grant account-wide
 CloudWatch Logs access.

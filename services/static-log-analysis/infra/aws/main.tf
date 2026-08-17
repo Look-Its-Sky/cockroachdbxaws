@@ -10,31 +10,6 @@ data "aws_subnets" "default" {
     values = [data.aws_vpc.default.id]
   }
 }
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-kernel-6.1-x86_64"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-
-  filter {
-    name   = "root-device-type"
-    values = ["ebs"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
 check "regional_boundary" {
   assert {
     condition     = data.aws_region.current.region == var.region
@@ -240,7 +215,7 @@ resource "aws_security_group" "service" {
 }
 
 resource "aws_instance" "service" {
-  ami                         = data.aws_ami.al2023.id
+  ami                         = var.machine_image_id
   instance_type               = var.instance_type
   subnet_id                   = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address = true
@@ -361,7 +336,7 @@ resource "aws_security_group" "demo" {
 
 resource "aws_instance" "demo" {
   count                       = var.deploy_demo ? 1 : 0
-  ami                         = data.aws_ami.al2023.id
+  ami                         = var.machine_image_id
   instance_type               = var.demo_instance_type
   subnet_id                   = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address = true

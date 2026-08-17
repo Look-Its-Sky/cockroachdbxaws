@@ -1,6 +1,10 @@
 region    = "us-east-2"
 tenant_id = "hackathon-production"
 
+# Pin an Amazon Linux 2023 x86_64 AMI from the configured region. Updating it
+# deliberately replaces both EC2 hosts; never roll it during an app release.
+machine_image_id = "ami-0123456789abcdef0"
+
 # Pin this to the commit you want the EC2 instance to build.
 repository_ref = "Static-Log-Analysis"
 

@@ -132,6 +132,26 @@ func TestAWSServiceBootstrapChangesPreserveTheEncryptedInstanceDisk(t *testing.T
 	}
 }
 
+func TestAWSInstancesUseAnExplicitPinnedMachineImage(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	variables := readProductionFile(t, "infra/aws/variables.tf")
+	if strings.Contains(main, `data "aws_ami"`) || strings.Contains(main, "most_recent = true") {
+		t.Fatal("a moving most-recent AMI can replace stateful hosts during an application deployment")
+	}
+	if !strings.Contains(variables, `variable "machine_image_id"`) {
+		t.Fatal("AWS infrastructure does not require an explicitly pinned machine image")
+	}
+	for _, resource := range []string{
+		`resource "aws_instance" "service"`,
+		`resource "aws_instance" "demo"`,
+	} {
+		instance := terraformResourceBlock(t, main, resource)
+		if !strings.Contains(instance, "ami                         = var.machine_image_id") {
+			t.Errorf("%s does not use the explicitly pinned machine image", resource)
+		}
+	}
+}
+
 func TestAWSProviderUsesTheDeclaredRegionalBoundary(t *testing.T) {
 	versions := readProductionFile(t, "infra/aws/versions.tf")
 	for _, required := range []string{

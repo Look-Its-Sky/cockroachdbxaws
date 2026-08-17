@@ -46,6 +46,16 @@ variable "instance_type" {
   default     = "t3.small"
 }
 
+variable "machine_image_id" {
+  description = "Region-specific Amazon Linux 2023 x86_64 AMI pinned for both EC2 hosts. Change only as a deliberate host replacement."
+  type        = string
+
+  validation {
+    condition     = can(regex("^ami-[0-9a-f]{17}$", var.machine_image_id))
+    error_message = "machine_image_id must be a modern 17-hex-character EC2 AMI ID."
+  }
+}
+
 variable "deploy_demo" {
   description = "Create a separate public OpenTelemetry Demo host and a watched CloudWatch payment-service log group."
   type        = bool
