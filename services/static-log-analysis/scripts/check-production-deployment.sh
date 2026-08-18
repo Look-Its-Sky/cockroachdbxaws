@@ -13,6 +13,10 @@ SLA_CREDENTIAL_IDENTITY='arn:aws:iam::111122223333:role/static-log-analysis-serv
 SLA_CLOUDWATCH_LOG_GROUPS='/aws/ecs/example=example=production' \
 SLA_OUTBOX_QUEUE_URL='https://sqs.us-east-1.amazonaws.com/111122223333/static-log-analysis' \
 SLA_OUTBOX_DEAD_LETTER_QUEUE_URL='https://sqs.us-east-1.amazonaws.com/111122223333/static-log-analysis-dlq' \
+SLA_ANALYSIS_IMAGE='111122223333.dkr.ecr.us-east-1.amazonaws.com/static-log-analysis/analysis@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+SLA_DASHBOARD_IMAGE='111122223333.dkr.ecr.us-east-1.amazonaws.com/static-log-analysis/dashboard@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+SLA_DASHBOARD_ADMIN_IMAGE='111122223333.dkr.ecr.us-east-1.amazonaws.com/static-log-analysis/dashboard-admin@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+SLA_RELEASE_SHA='dddddddddddddddddddddddddddddddddddddddd' \
   docker compose --file "$service_root/deploy/aws/compose.yaml" config --quiet --no-path-resolution
 
 docker run --rm \

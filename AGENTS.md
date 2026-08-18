@@ -120,6 +120,15 @@ production secret/database input file was absent. The sanitized evidence and
 the required prebuilt-image milestone are in
 `docs/deployment/aws-release-attempt-2026-08-17.md`.
 
+The prebuilt-image milestone is implemented but not yet accepted on AWS.
+Terraform owns separate immutable, scan-on-push ECR repositories for the
+analysis, dashboard, and dashboard-admin artifacts; the host has repository-
+scoped pull access. Production Compose now requires digest-pinned images, the
+off-host publisher builds every artifact from one clean commit, and the host
+cutover performs pre-pull verification, migrations, bounded health checks, and
+automatic rollback to the prior release file. The live ECR apply, publication,
+in-place bootstrap refresh, and application cutover remain release work.
+
 Local integration is available through `compose.local-integration.yaml`. It
 joins the static-analysis Compose network, creates a separate agent database
 and a context-reader user limited to the three safe projection tables, binds

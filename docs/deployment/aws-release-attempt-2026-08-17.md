@@ -117,3 +117,21 @@ For the agent, provision production secrets through a managed secret system
 rather than committing or printing them, apply the documented least-privilege
 database grants, and run the investigation-only acceptance sequence in
 `docs/agent-sqs-deployment.md`. Automated remediation remains disabled.
+
+## Follow-up implementation
+
+The immutable-image milestone is now implemented in the repository. Terraform
+owns three private ECR repositories with immutable tags and scanning, and the
+analysis instance can authenticate to ECR globally only for the AWS-required
+authorization token while layer and manifest reads are scoped to those exact
+repositories. Production Compose has no application `build` stanza and
+requires digest references for the analysis, dashboard, and dashboard-admin
+artifacts.
+
+The off-host publisher builds all three artifacts from one clean commit and
+resolves their registry digests. The host cutover helper pulls and inspects all
+three before migrations or restart, admits only the configured repositories,
+uses a bounded health gate, and restores the prior digest selection on failure.
+This follow-up describes implemented code, not live release evidence; the ECR
+apply, image publication, bootstrap refresh, cutover, and public dashboard
+verification still need to succeed before the AWS application is accepted.

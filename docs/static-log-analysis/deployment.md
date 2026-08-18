@@ -25,15 +25,19 @@ not a second production deployment method.
 ## Prerequisites
 
 - An AWS account with a default VPC and at least one default public subnet.
-- AWS CLI authentication with permission to create EC2, IAM, SQS, security
-  group, Elastic IP, and Systems Manager resources.
+- AWS CLI authentication with permission to create EC2, IAM, ECR, SQS,
+  security group, Elastic IP, and Systems Manager resources, and to push images
+  to the three Terraform-owned ECR repositories.
 - Terraform 1.5 or newer.
+- Docker Buildx on the operator workstation or CI runner. Production images are
+  never built on the stateful analysis host.
 - A managed CockroachDB cluster in the same physical region, with a database
   named `static_log_analysis` and a TLS connection string. The database may
   have no regional metadata or exactly one CockroachDB region; databases with
   multiple or secondary regions are rejected.
 - Existing CloudWatch log groups in that region and account.
-- The repository commit or branch to deploy must be pushed to GitHub.
+- The exact repository commit to deploy must be committed, pushed, and checked
+  out with no tracked or untracked changes.
 
 The instance uses a stable Elastic IP for outbound connections. Its security
 group has no inbound rules; the address exists so CockroachDB Cloud can
@@ -64,7 +68,6 @@ Edit only `terraform.tfvars`. Set:
 
 - the AWS region and tenant identity;
 - the exact Amazon Linux 2023 x86_64 AMI already approved for that region;
-- a pushed branch, tag, or commit in `repository_ref`;
 - every CloudWatch log group and its trusted service/environment identity;
 - the account number inside each exact log-group ARN.
 
@@ -99,11 +102,11 @@ the prior state before creating it. Only a confirmed first deployment may run
 `terraform workspace new "$deployment_workspace"`.
 
 This creates the outbound-only analysis instance, its stable Elastic IP and
-least-privilege IAM profile, the assignment and dead-letter queues, and—when
-`deploy_demo=true`—the separate demo instance and payment log group. Bootstrap
-installs Docker, checks out the declared repository revision, and installs the
-service unit and database setup helper. It does not start the analysis
-containers until the database connection is installed.
+least-privilege IAM profile, the assignment and dead-letter queues, three
+private ECR repositories with immutable tags, and—when `deploy_demo=true`—the
+separate demo instance and payment log group. Bootstrap installs Docker Compose,
+the service unit, and root-only setup and image-cutover helpers. It does not
+clone source or compile an application on the host.
 
 ## 4. Authorize CockroachDB and install the database secret
 
@@ -159,20 +162,75 @@ postgresql://USERNAME:URL_ENCODED_PASSWORD@HOST:26257/static_log_analysis?sslmod
 The DSN is stored only in `/etc/static-log-analysis/secrets.env`, owned by
 `root:root` with mode `0600` on the encrypted EC2 root disk. It never enters
 Terraform state, `.tfvars`, EC2 user data, Git, or shell history. Running the
-helper again rotates the connection and restarts the already-deployed service.
+helper again rotates the connection and restarts an already-deployed release.
+On a new host it records the secret and waits for the first digest-pinned image
+release.
 
-Routine systemd starts never fetch source or rebuild an image. This keeps a
-restart from silently changing the deployed release. To deploy the configured
-`repository_ref` explicitly after it has been pushed, run:
+## 5. Publish and deploy an immutable application release
+
+Run the full release gates before publishing. From the Terraform directory on
+the operator workstation, collect the repository outputs without copying them
+into source files:
 
 ```bash
-sudo deploy-static-log-analysis
+release_sha=$(git -C ../../../.. rev-parse HEAD)
+repositories=$(terraform output -json release_image_repositories)
+analysis_repository=$(printf '%s' "$repositories" | jq -r .analysis)
+dashboard_repository=$(printf '%s' "$repositories" | jq -r .dashboard)
+dashboard_admin_repository=$(printf '%s' "$repositories" | jq -r '."dashboard-admin"')
+
+../../scripts/publish-aws-images.sh \
+  "$AWS_REGION" \
+  "$analysis_repository" \
+  "$dashboard_repository" \
+  "$dashboard_admin_repository" \
+  "$release_sha"
 ```
 
-That helper fetches the configured Git revision, builds it successfully, and
-only then restarts the service on the new local image.
+The publisher refuses a dirty checkout or a SHA other than `HEAD`. It builds
+all three Linux/amd64 artifacts off-host, pushes the same immutable commit tag
+to each repository, resolves the registry digests, and prints the three digest
+references needed for cutover. Record those values in the private release
+runbook; do not add an account-specific repository URL to this public repo.
 
-## 5. Configure the optional authenticated dashboard
+For an existing instance created before digest-based releases, apply Terraform
+first and refresh the in-place bootstrap through Session Manager. Retrieve the
+new EC2 user data with IMDSv2 and run it once; this preserves the encrypted disk,
+Docker volumes, database secret, dashboard secret, and release history:
+
+```bash
+token=$(curl -fsS -X PUT \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+  http://169.254.169.254/latest/api/token)
+curl -fsS -H "X-aws-ec2-metadata-token: $token" \
+  http://169.254.169.254/latest/user-data > /tmp/static-log-analysis-bootstrap
+sudo bash /tmp/static-log-analysis-bootstrap
+rm -f /tmp/static-log-analysis-bootstrap
+```
+
+Then deploy the publisher's exact values inside the Session Manager shell:
+
+```bash
+sudo deploy-static-log-analysis-images \
+  '<analysis-repository>@sha256:<digest>' \
+  '<dashboard-repository>@sha256:<digest>' \
+  '<dashboard-admin-repository>@sha256:<digest>' \
+  '<40-character-release-sha>'
+```
+
+The helper rejects a digest from any repository other than the three created by
+this Terraform state. Before altering the running release it logs in with the
+instance profile, pulls and inspects all images, and runs both migrations. It
+then restarts the Compose project and allows 120 seconds for each required
+service to become healthy. On failure it restores the prior root-only
+`release.env`, restarts the prior digests, and exits unsuccessfully. The first
+digest-based release has no digest-based predecessor; if it fails, the helper
+stops the candidate and reports that manual recovery is required.
+
+Routine systemd starts never authenticate to ECR, fetch source, build an image,
+or change the release selection.
+
+## 6. Configure the optional authenticated dashboard
 
 Set these Terraform values and apply the reviewed plan:
 
@@ -191,9 +249,9 @@ sudo create-static-log-analysis-dashboard-admin
 ```
 
 The first command generates a high-entropy Better Auth secret on the host,
-stores it in `/etc/static-log-analysis/dashboard.env` with mode `0600`, builds
-the optional dashboard containers, applies the SQLite authentication schema,
-and starts Caddy. The second command securely prompts for the first
+stores it in `/etc/static-log-analysis/dashboard.env` with mode `0600`, applies
+the SQLite authentication schema from the already-pulled admin image, and
+starts the dashboard and Caddy. The second command securely prompts for the first
 administrator's email and password; the password is sent over the container's
 standard input and is not placed in a command argument or environment file.
 
@@ -206,7 +264,7 @@ Open the value printed by `terraform output -raw dashboard_url`. The internet
 can reach the sign-in screen, but a missing, banned, or non-admin account is
 denied. See [dashboard.md](dashboard.md) for the exact safe-data contract.
 
-## 6. Verify the complete path
+## 7. Verify the complete path
 
 Inside the Session Manager shell:
 
@@ -237,17 +295,13 @@ assignments remain in the queue.
 
 ## Updating and removing it
 
-For a hackathon code refresh, connect through Session Manager, replace the
-safe `SLA_REPOSITORY_REF` value in `/etc/static-log-analysis.env`, and run
-`sudo deploy-static-log-analysis`. The deployment helper fetches and builds that
-revision while preserving the existing Docker volumes.
-
-Changing `repository_ref` updates the desired bootstrap configuration without
-replacing the analysis EC2 instance. Run `sudo deploy-static-log-analysis` to
-fetch and deploy the new ref. When the bootstrap template itself changes, an
-operator must deliberately refresh it through Session Manager; this preserves
-the local journal, dashboard auth database, checkpoints, and installed
-CockroachDB connection. Replace the instance only for a deliberate reset.
+For an application refresh, publish the next clean commit and call
+`deploy-static-log-analysis-images` with its three resolved digests. Do not edit
+`release.env` directly. When the bootstrap template itself changes, apply the
+Terraform plan and deliberately refresh the current user data through Session
+Manager; this preserves the local journal, dashboard auth database,
+checkpoints, installed CockroachDB connection, and prior digest selection.
+Replace the instance only for a deliberate state reset.
 
 To remove the AWS resources:
 
@@ -258,3 +312,5 @@ terraform destroy
 Destroying the EC2 instance deletes its root disk and therefore its journal,
 checkpoints, and root-only `secrets.env`. Data already stored in managed
 CockroachDB is not deleted by this module.
+Non-empty ECR repositories are not force-deleted; removing published release
+artifacts requires a separate, explicit registry cleanup operation.

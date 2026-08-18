@@ -1,10 +1,7 @@
 name: static-log-analysis-aws
 
 x-service: &service
-  image: static-log-analysis:hackathon
-  build:
-    context: /opt/static-log-analysis/repository/services/static-log-analysis
-    dockerfile: Dockerfile
+  image: ${SLA_ANALYSIS_IMAGE:?immutable analysis image digest is required}
   environment:
     STATIC_LOG_ANALYSIS_DATABASE_DSN: ${STATIC_LOG_ANALYSIS_DATABASE_DSN:?database DSN was not loaded from secrets.env}
     AWS_REGION: ${SLA_REGION:?AWS region is required}
@@ -87,10 +84,7 @@ services:
     stop_grace_period: 60s
 
   dashboard:
-    image: static-log-analysis-dashboard:hackathon
-    build:
-      context: /opt/static-log-analysis/repository/services/dashboard
-      dockerfile: Dockerfile
+    image: ${SLA_DASHBOARD_IMAGE:?immutable dashboard image digest is required}
     profiles: ["dashboard"]
     environment:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
@@ -105,7 +99,7 @@ services:
       OUTBOX_HEALTH_URL: http://outbox:9464/readyz
       AGENT_API_URL: ${AGENT_API_URL:-}
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
-      SLA_RELEASE_SHA: ${SLA_REPOSITORY_REF:-}
+      SLA_RELEASE_SHA: ${SLA_RELEASE_SHA:?release commit is required}
     depends_on:
       cloudwatch:
         condition: service_healthy
@@ -124,11 +118,7 @@ services:
       start_period: 20s
 
   dashboard-auth-migrate:
-    image: static-log-analysis-dashboard-admin:hackathon
-    build:
-      context: /opt/static-log-analysis/repository/services/dashboard
-      dockerfile: Dockerfile
-      target: admin
+    image: ${SLA_DASHBOARD_ADMIN_IMAGE:?immutable dashboard admin image digest is required}
     profiles: ["dashboard"]
     command: ["npm", "run", "auth:migrate"]
     environment:
@@ -143,11 +133,7 @@ services:
     restart: "no"
 
   dashboard-create-admin:
-    image: static-log-analysis-dashboard-admin:hackathon
-    build:
-      context: /opt/static-log-analysis/repository/services/dashboard
-      dockerfile: Dockerfile
-      target: admin
+    image: ${SLA_DASHBOARD_ADMIN_IMAGE:?immutable dashboard admin image digest is required}
     profiles: ["dashboard-admin"]
     command: ["npm", "run", "auth:create-admin"]
     environment:

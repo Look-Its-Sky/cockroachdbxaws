@@ -145,28 +145,6 @@ variable "root_volume_gib" {
   }
 }
 
-variable "repository_url" {
-  description = "Git repository the instance builds the service image from."
-  type        = string
-  default     = "https://github.com/Look-Its-Sky/cockroachdbxaws.git"
-
-  validation {
-    condition     = can(regex("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$", var.repository_url))
-    error_message = "repository_url must be an HTTPS GitHub clone URL ending in .git."
-  }
-}
-
-variable "repository_ref" {
-  description = "Branch, tag, or commit fetched and built by the instance. Pin a commit for a repeatable demo."
-  type        = string
-  default     = "Static-Log-Analysis"
-
-  validation {
-    condition     = can(regex("^[A-Za-z0-9._/-]+$", var.repository_ref))
-    error_message = "repository_ref contains unsupported characters."
-  }
-}
-
 variable "cloudwatch_sources" {
   description = "Exact same-account regional CloudWatch log groups and deterministic identity assigned to each."
   type = map(object({

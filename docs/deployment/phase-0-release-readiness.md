@@ -14,6 +14,9 @@
 > cutover are recorded in
 > [aws-release-attempt-2026-08-17.md](aws-release-attempt-2026-08-17.md). That
 > newer record supersedes this document's release SHA and agent-IAM status.
+> The source-build deployment commands below are historical evidence and must
+> not be used; the current digest-based procedure is in
+> [deployment.md](../static-log-analysis/deployment.md).
 
 ## Public repository handling
 
@@ -38,8 +41,8 @@ The sole planned change is the analysis instance's stored user-data value for
 `SLA_REPOSITORY_REF`, from the former branch name to the pinned merged commit.
 Because the instance is configured with `user_data_replace_on_change = false`,
 applying that plan does not deploy the new application revision or replace the
-host. The operator must still update `SLA_REPOSITORY_REF` on the host through
-Session Manager and run `sudo deploy-static-log-analysis` as documented.
+host. That historical source-build mechanism has since been replaced by the
+digest-based release procedure linked above.
 
 No AWS resource was created, changed, restarted, or deleted during this Phase 0
 review.
@@ -53,7 +56,7 @@ The ignored operator file
 |---|---|
 | Region | Explicitly configured and validated against the provider |
 | Tenant | Configured in the ignored operator file |
-| Repository ref | Pinned release SHA above |
+| Historical repository ref | Pinned release SHA above; no longer a current Terraform input |
 | Optional demo | Enabled |
 | Demo size | Explicitly configured in the ignored operator file |
 | Demo ingress | One operator `/32` |
@@ -173,8 +176,8 @@ the request did not authorize modifying that environment.
 
 - Added the combined platform deployment plan and linked it from the root
   README.
-- Pinned the ignored local Terraform `repository_ref` to the merged release
-  SHA.
+- Pinned the then-current ignored Terraform `repository_ref` to the merged
+  release SHA. That input was later removed with the on-host build path.
 - Formatted the ignored local Terraform variables file.
 - Selected the existing account-specific Terraform workspace locally.
 - Restricted local Terraform variables and state files to mode `0600` and
@@ -222,15 +225,9 @@ terraform plan -out=static-log-analysis.tfplan
 
 Review that the plan still contains no add or destroy action. Applying the
 current plan records the new desired bootstrap user data but does not run it.
-To deploy the merged release after the plan review, use Session Manager and
-follow the existing in-place update procedure:
-
-```bash
-sudoedit /etc/static-log-analysis.env
-# Set SLA_REPOSITORY_REF to the release SHA recorded at the top of this file.
-sudo deploy-static-log-analysis
-sudo systemctl status static-log-analysis --no-pager
-```
+The source-build procedure recorded by this historical review has been removed.
+Use the immutable ECR publication, in-place bootstrap refresh, and bounded
+`deploy-static-log-analysis-images` cutover in the current deployment guide.
 
 Then run the health, metrics, Compose, SQS, and dashboard smoke checks in
 `docs/static-log-analysis/deployment.md`. Stop before agent integration: the
