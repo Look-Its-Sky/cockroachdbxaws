@@ -49,36 +49,46 @@ done
 aws ecr get-login-password --region "$region" |
   docker login --username AWS --password-stdin "$registry" >/dev/null
 
-docker buildx build \
-  --platform linux/amd64 \
-  --provenance=true \
-  --sbom=true \
-  --tag "$analysis_repository:$commit_sha" \
-  --push "$service_root"
-docker buildx build \
-  --platform linux/amd64 \
-  --provenance=true \
-  --sbom=true \
-  --target runtime \
-  --tag "$dashboard_repository:$commit_sha" \
-  --push "$repository_root/services/dashboard"
-docker buildx build \
-  --platform linux/amd64 \
-  --provenance=true \
-  --sbom=true \
-  --target admin \
-  --tag "$dashboard_admin_repository:$commit_sha" \
-  --push "$repository_root/services/dashboard"
-
-resolve_digest() {
-  local repository_url=$1 repository_name digest
+published_digest() {
+  local repository_url=$1 repository_name
   repository_name=${repository_url#*/}
-  digest=$(aws ecr describe-images \
+  aws ecr describe-images \
     --region "$region" \
     --repository-name "$repository_name" \
     --image-ids "imageTag=$commit_sha" \
     --query 'imageDetails[0].imageDigest' \
-    --output text)
+    --output text 2>/dev/null || true
+}
+
+publish_image() {
+  local repository_url=$1 context=$2 target=$3 existing_digest
+  existing_digest=$(published_digest "$repository_url")
+  if [[ "$existing_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "reusing the existing immutable commit artifact in ${repository_url#*/}" >&2
+    return
+  fi
+
+  local -a build_args=(
+    --platform linux/amd64
+    --provenance=true
+    --sbom=true
+    --tag "$repository_url:$commit_sha"
+    --push
+  )
+  if [ -n "$target" ]; then
+    build_args+=(--target "$target")
+  fi
+  docker buildx build "${build_args[@]}" "$context"
+}
+
+publish_image "$analysis_repository" "$service_root" ""
+publish_image "$dashboard_repository" "$repository_root/services/dashboard" runtime
+publish_image "$dashboard_admin_repository" "$repository_root/services/dashboard" admin
+
+resolve_digest() {
+  local repository_url=$1 repository_name digest
+  repository_name=${repository_url#*/}
+  digest=$(published_digest "$repository_url")
   if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "registry did not return an immutable digest for $repository_name" >&2
     exit 1

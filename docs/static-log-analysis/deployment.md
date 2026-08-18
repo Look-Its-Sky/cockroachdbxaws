@@ -193,7 +193,9 @@ to each repository, resolves the registry digests, and prints the three digest
 references needed for cutover. Its checksum-pinned Buildx plugin and ECR login
 live in a disposable Docker configuration that is removed on exit. Record the
 values in the private release runbook; do not add an account-specific
-repository URL to this public repo.
+repository URL to this public repo. Publication is resumable: if an interrupted
+run already committed one artifact under the immutable commit tag, a retry
+reuses that exact artifact and continues with the missing repositories.
 
 For an existing instance created before digest-based releases, apply Terraform
 first and refresh the in-place bootstrap through Session Manager. Retrieve the
