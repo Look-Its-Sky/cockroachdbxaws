@@ -108,8 +108,17 @@ exact SQS attributes against a trusted region/tenant/classification boundary,
 then reads the immutable `SafeValue` snapshot through a distinct read-only
 analysis database connection. Terraform provides an exact-queue App Runner
 consumer role, and the agent deployer pins one instance and forces remediation
-off. Database grants, Terraform apply, App Runner deployment, and end-to-end
-release evidence remain operator work; see `docs/agent-sqs-deployment.md`.
+off. Database grants, App Runner deployment, and end-to-end release evidence
+remain operator work; see `docs/agent-sqs-deployment.md`.
+
+AWS deployment follow-up on 2026-08-17 applied the exact-queue App Runner
+runtime role and policy and left Terraform at zero drift. The application
+cutover was not accepted: the on-host dashboard `next build` hit SSM's one-hour
+timeout, and recovery produced outbox readiness but not CloudWatch readiness or
+dashboard reachability. The agent application was not launched because the
+production secret/database input file was absent. The sanitized evidence and
+the required prebuilt-image milestone are in
+`docs/deployment/aws-release-attempt-2026-08-17.md`.
 
 Local integration is available through `compose.local-integration.yaml`. It
 joins the static-analysis Compose network, creates a separate agent database

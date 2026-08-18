@@ -10,6 +10,11 @@
 
 **Terraform workspace:** `account-<aws-account-id>`
 
+> Follow-up: the 2026-08-17 infrastructure apply and unsuccessful application
+> cutover are recorded in
+> [aws-release-attempt-2026-08-17.md](aws-release-attempt-2026-08-17.md). That
+> newer record supersedes this document's release SHA and agent-IAM status.
+
 ## Public repository handling
 
 This is the sanitized release record. Live account and resource IDs, principal
