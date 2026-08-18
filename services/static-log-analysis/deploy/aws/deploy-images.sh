@@ -87,7 +87,11 @@ compose() {
 }
 
 wait_for_service_health() {
-  local service=$1 health_attempts=24 attempt container_id health
+  local service=$1 default_health_attempts=24 cloudwatch_health_attempts=240
+  local health_attempts=$default_health_attempts attempt container_id health
+  if [ "$service" = "cloudwatch" ]; then
+    health_attempts=$cloudwatch_health_attempts
+  fi
   for ((attempt = 1; attempt <= health_attempts; attempt++)); do
     container_id=$(compose ps --quiet "$service" 2>/dev/null || true)
     if [ -n "$container_id" ]; then

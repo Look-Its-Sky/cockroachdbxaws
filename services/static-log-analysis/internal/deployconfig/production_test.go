@@ -317,13 +317,18 @@ func TestAWSImageCutoverIsBoundedAndRollsBack(t *testing.T) {
 		`docker pull "$dashboard_image"`,
 		`docker pull "$dashboard_admin_image"`,
 		`previous_release_file`,
-		`health_attempts=24`,
+		`default_health_attempts=24`,
+		`cloudwatch_health_attempts=240`,
 		`restore_previous_release`,
 		`systemctl restart static-log-analysis.service`,
 	} {
 		if !strings.Contains(deployer, required) {
 			t.Errorf("image deployment helper does not contain %q", required)
 		}
+	}
+	compose := readProductionFile(t, "deploy/aws/compose.yaml")
+	if !strings.Contains(compose, "start_period: 15m") {
+		t.Fatal("CloudWatch health can fail before a large durable journal finishes startup verification")
 	}
 	for _, forbidden := range []string{"git ", "docker compose build", "latest"} {
 		if strings.Contains(deployer, forbidden) {

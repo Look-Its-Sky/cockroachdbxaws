@@ -1537,6 +1537,32 @@ func (j *Journal) countNamespace(ns byte) (uint64, error) {
 	return count, iter.Error()
 }
 
+// startupVerificationRecord is the bounded part of a durable record needed to
+// cross-check state indexes and batch references after its full envelope has
+// already decoded and passed policy validation. Keeping the encoded envelope
+// here makes startup memory proportional to the journal's payload bytes and can
+// prevent a valid journal from ever becoming ready on its configured host.
+type startupVerificationRecord struct {
+	state       State
+	priority    Priority
+	received    time.Time
+	claimExpiry time.Time
+	committedAt time.Time
+	attempt     uint32
+	claimOwner  string
+	claimToken  string
+	semantic    [32]byte
+}
+
+func startupVerificationRecordFrom(stored storedRecord) startupVerificationRecord {
+	return startupVerificationRecord{
+		state: stored.state, priority: stored.priority, received: stored.received,
+		claimExpiry: stored.claimExpiry, committedAt: stored.committedAt,
+		attempt: stored.attempt, claimOwner: stored.claimOwner,
+		claimToken: stored.claimToken, semantic: stored.semantic,
+	}
+}
+
 func (j *Journal) verify() error {
 	var calculated uint64
 	iter, err := j.db.NewIter(nil)
@@ -1544,7 +1570,7 @@ func (j *Journal) verify() error {
 		return err
 	}
 	defer iter.Close()
-	records := map[string]storedRecord{}
+	records := map[string]startupVerificationRecord{}
 	pending := map[string]string{}
 	claims := map[string]string{}
 	committed := map[string]string{}
@@ -1617,7 +1643,7 @@ func (j *Journal) verify() error {
 			if err != nil || semantic != r.semantic {
 				return errDecode
 			}
-			records[id] = r
+			records[id] = startupVerificationRecordFrom(r)
 		case nsPending:
 			_, _, id, ok := parsePendingKey(k)
 			if !ok || len(v) != 0 {

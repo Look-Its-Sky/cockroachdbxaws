@@ -176,6 +176,38 @@ Manager session also failed to become interactive and was explicitly
 terminated. No inbound SSH rule was opened and no additional reboot was issued
 after that bounded audit.
 
+## CloudWatch startup diagnosis and repair
+
+Follow-up on 2026-08-18 recovered SSM with an EC2 stop/start that preserved the
+encrypted root disk, Elastic IP, secrets, release selection, and Docker volumes.
+The VM and underlying host passed both EC2 status checks before that recovery.
+A bounded live diagnostic found outbox healthy, CloudWatch running without an
+admin listener, the dashboard held in `created`, and Caddy running without an
+application upstream.
+
+A Go `SIGQUIT` stack dump identified the exact startup block: CloudWatch was in
+`journal.verify`, synchronously reading and validating the durable Pebble
+journal before binding readiness. The live journal was 1.8 GiB. Verification
+retained each decoded durable envelope for later cross-reference checks, which
+made startup memory proportional to payload bytes; the process reached 1.52 GiB
+on the 2 GiB host while still scanning. The two-minute release gate therefore
+expired before a valid large journal could start, and continued recovery risked
+an OOM loop.
+
+The repair keeps the full corruption, policy, accounting, state-index, and
+batch-reference validation. After each envelope is decoded and validated,
+startup now retains only bounded state and cross-reference metadata. The AWS
+healthcheck treats the first 15 minutes as a recovery period but becomes healthy
+immediately on a successful probe, and the immutable-image cutover gives the
+CloudWatch role a bounded 20-minute health budget. Other service health budgets
+remain two minutes. Regression tests pin both the bounded metadata footprint
+and the distinct production recovery budget.
+
+This section records the diagnosed cause and implemented repair. The application
+is accepted only after the repaired immutable image is published, the host
+deployment files are refreshed, CloudWatch and dashboard health pass, and the
+public HTTPS endpoint returns an authenticated dashboard response.
+
 Current honest state:
 
 - Terraform is converged and all three immutable release artifacts exist;

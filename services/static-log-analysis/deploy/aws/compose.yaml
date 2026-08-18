@@ -56,7 +56,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 12
-      start_period: 10s
+      # Opening a durable journal verifies every record and cross-reference.
+      # A large valid journal can take minutes; failures during that bounded
+      # recovery window must not hold the dashboard behind a false unhealthy
+      # state. A successful probe still marks the service healthy immediately.
+      start_period: 15m
     stop_grace_period: 60s
 
   outbox:

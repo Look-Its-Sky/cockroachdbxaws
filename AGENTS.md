@@ -138,6 +138,14 @@ The idempotent bootstrap follow-up is committed but intentionally unapplied;
 its final live plan is one in-place metadata change with no create, destroy, or
 replacement action, and applying it waits on management-channel recovery.
 
+AWS follow-up on 2026-08-18 recovered the management channel and traced the
+CloudWatch readiness failure to the full Pebble journal verifier retaining every
+decoded envelope during startup. The repair retains only bounded verification
+metadata while preserving the corruption checks and gives this recovery path a
+distinct bounded health window. Publication, cutover, and public dashboard
+acceptance remain release evidence to collect; see
+`docs/deployment/aws-release-attempt-2026-08-17.md`.
+
 Local integration is available through `compose.local-integration.yaml`. It
 joins the static-analysis Compose network, creates a separate agent database
 and a context-reader user limited to the three safe projection tables, binds
