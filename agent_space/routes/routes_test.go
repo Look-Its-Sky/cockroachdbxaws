@@ -8,7 +8,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent_space/remediation"
 	"agent_space/utils"
+	"agent_space/worker"
 )
 
 // the route set as main.go registers it; Gin panics on a conflicting pattern at
@@ -68,6 +70,7 @@ func TestRoutesRegisterWithoutConflicting(t *testing.T) {
 // with nothing wired up, every remediation route has to say which prerequisite
 // is missing rather than panicking on a nil store
 func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
+	RemediationWritesEnabled = false
 	Remediation, Solutions, Repos, Publisher, Results, Incidents = nil, nil, nil, nil, nil, nil
 
 	r := router()
@@ -86,6 +89,34 @@ func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
 
 			if w.Code != http.StatusServiceUnavailable {
 				t.Errorf("status = %d, want 503 with an explanation; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRemediationWritesStayOffWhenReadModelsAreAvailable(t *testing.T) {
+	RemediationWritesEnabled = false
+	Remediation = &remediation.Runner{}
+	Solutions = &remediation.Solutions{}
+	Repos = &remediation.Repositories{}
+	Publisher = remediation.NewPublisher("")
+	Results = worker.NewStore()
+	t.Cleanup(func() {
+		RemediationWritesEnabled = false
+		Remediation, Solutions, Repos, Publisher, Results, Incidents = nil, nil, nil, nil, nil, nil
+	})
+
+	r := router()
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/agent/inv-1/remediation"},
+		{http.MethodPost, "/solutions/cand-1/pr"},
+		{http.MethodPost, "/agent/inv-1/decision"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503 while remediation writes are disabled; body: %s", w.Code, w.Body.String())
 			}
 		})
 	}

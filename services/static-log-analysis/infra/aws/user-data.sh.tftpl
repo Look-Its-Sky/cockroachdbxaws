@@ -1,39 +1,30 @@
 #!/bin/bash
 set -euxo pipefail
 
-dnf install -y docker git awscli-2 openssl
+command -v docker >/dev/null && command -v aws >/dev/null && \
+  command -v openssl >/dev/null && command -v curl >/dev/null || \
+  dnf install -y docker awscli-2 openssl curl
 systemctl enable --now docker
-
-# The t3.small runtime is sufficient for the service but a clean Next.js image
-# build can exceed its 2 GiB RAM. Keep a bounded swap file on the encrypted root
-# disk so deployment cannot wedge the host under memory pressure.
-if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
-  test -f /swapfile || fallocate -l 2G /swapfile
-  chmod 0600 /swapfile
-  mkswap /swapfile
-  swapon /swapfile
-  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
 
 install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/static-log-analysis
 install -d -o root -g root -m 0700 /etc/static-log-analysis
-curl -fsSL \
-  https://github.com/docker/buildx/releases/download/v0.34.1/buildx-v0.34.1.linux-amd64 \
-  -o /usr/local/lib/docker/cli-plugins/docker-buildx
-echo 'f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b  /usr/local/lib/docker/cli-plugins/docker-buildx' | sha256sum --check
-chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx
-curl -fsSL \
-  https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-echo 'c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum --check
-chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
-docker buildx version
+compose_plugin=/usr/local/lib/docker/cli-plugins/docker-compose
+compose_sha256=c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e
+printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check >/dev/null 2>&1 || {
+  curl -fsSL \
+    https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
+    -o "$compose_plugin"
+  printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check
+  chmod 0755 "$compose_plugin"
+}
 docker compose version
 
 printf '%s' '${compose_base64}' | base64 --decode | gzip --decompress > /opt/static-log-analysis/compose.yaml
 chmod 0644 /opt/static-log-analysis/compose.yaml
 printf '%s' '${caddy_base64}' | base64 --decode | gzip --decompress > /opt/static-log-analysis/Caddyfile
 chmod 0644 /opt/static-log-analysis/Caddyfile
+printf '%s' '${deploy_images_base64}' | base64 --decode | gzip --decompress > /usr/local/sbin/deploy-static-log-analysis-images
+chmod 0750 /usr/local/sbin/deploy-static-log-analysis-images
 
 cat > /etc/static-log-analysis.env <<'ENVIRONMENT'
 SLA_REGION='${region}'
@@ -45,8 +36,9 @@ SLA_CREDENTIAL_IDENTITY='${credential_identity}'
 SLA_CLOUDWATCH_LOG_GROUPS='${cloudwatch_groups}'
 SLA_OUTBOX_QUEUE_URL='${queue_url}'
 SLA_OUTBOX_DEAD_LETTER_QUEUE_URL='${dead_letter_queue_url}'
-SLA_REPOSITORY_URL='${repository_url}'
-SLA_REPOSITORY_REF='${repository_ref}'
+SLA_ANALYSIS_IMAGE_REPOSITORY='${analysis_image_repository}'
+SLA_DASHBOARD_IMAGE_REPOSITORY='${dashboard_image_repository}'
+SLA_DASHBOARD_ADMIN_IMAGE_REPOSITORY='${dashboard_admin_image_repository}'
 SLA_JOURNAL_MAX_BYTES='${journal_max_bytes}'
 SLA_JOURNAL_MIN_FREE_BYTES='${journal_min_free_bytes}'
 SLA_DASHBOARD_ENABLED='${dashboard_enabled}'
@@ -108,12 +100,11 @@ install -o root -g root -m 0600 "$temporary_secret" "$database_secret_file"
 rm -f "$temporary_secret"
 trap - EXIT
 
-if docker image inspect static-log-analysis:hackathon >/dev/null 2>&1; then
+if [ -f /etc/static-log-analysis/release.env ]; then
   systemctl restart static-log-analysis.service
   echo "database DSN installed; static-log-analysis restarted"
 else
-  /usr/local/sbin/deploy-static-log-analysis
-  echo "database DSN installed; static-log-analysis deployed and started"
+  echo "database DSN installed; publish images and run deploy-static-log-analysis-images"
 fi
 SCRIPT
 chmod 0750 /usr/local/sbin/set-static-log-analysis-database-dsn
@@ -146,12 +137,12 @@ install -o root -g root -m 0600 "$temporary_secret" "$dashboard_secret_file"
 rm -f "$temporary_secret"
 trap - EXIT
 
-if docker image inspect static-log-analysis-dashboard:hackathon >/dev/null 2>&1; then
+if [ -f /etc/static-log-analysis/release.env ]; then
   systemctl restart static-log-analysis.service
+  echo "dashboard authentication installed and migrations applied"
 else
-  /usr/local/sbin/deploy-static-log-analysis
+  echo "dashboard authentication installed; publish images and run deploy-static-log-analysis-images to apply migrations"
 fi
-echo "dashboard authentication installed and migrations applied"
 echo "create a login with: sudo create-static-log-analysis-dashboard-admin"
 SCRIPT
 chmod 0750 /usr/local/sbin/set-static-log-analysis-dashboard-auth
@@ -166,6 +157,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 set -a
 . /etc/static-log-analysis.env
+. /etc/static-log-analysis/release.env
 set +a
 if [ "$SLA_DASHBOARD_ENABLED" != "true" ]; then
   echo "enable dashboard_enabled in Terraform before creating a dashboard administrator" >&2
@@ -218,7 +210,33 @@ cat > /usr/local/sbin/start-static-log-analysis <<'SCRIPT'
 set -euo pipefail
 set -a
 . /etc/static-log-analysis.env
+if [ ! -f /etc/static-log-analysis/release.env ]; then
+  echo "no digest-pinned release is installed; run deploy-static-log-analysis-images" >&2
+  exit 1
+fi
+. /etc/static-log-analysis/release.env
 set +a
+
+validate_release_image() {
+  local image=$1 repository=$2
+  [ "$${image%@sha256:*}" = "$repository" ] && [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]]
+}
+validate_release_image "$SLA_ANALYSIS_IMAGE" "$SLA_ANALYSIS_IMAGE_REPOSITORY" || {
+  echo "analysis image is not pinned to the configured repository digest" >&2
+  exit 1
+}
+validate_release_image "$SLA_DASHBOARD_IMAGE" "$SLA_DASHBOARD_IMAGE_REPOSITORY" || {
+  echo "dashboard image is not pinned to the configured repository digest" >&2
+  exit 1
+}
+validate_release_image "$SLA_DASHBOARD_ADMIN_IMAGE" "$SLA_DASHBOARD_ADMIN_IMAGE_REPOSITORY" || {
+  echo "dashboard admin image is not pinned to the configured repository digest" >&2
+  exit 1
+}
+[[ "$SLA_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "release SHA is invalid" >&2
+  exit 1
+}
 
 database_secret_file=/etc/static-log-analysis/secrets.env
 if [ ! -f "$database_secret_file" ] || [ -L "$database_secret_file" ]; then
@@ -264,52 +282,6 @@ fi
 SCRIPT
 chmod 0750 /usr/local/sbin/start-static-log-analysis
 
-cat > /usr/local/sbin/deploy-static-log-analysis <<'SCRIPT'
-#!/bin/bash
-set -euo pipefail
-
-if [ "$EUID" -ne 0 ]; then
-  echo "run this command with sudo" >&2
-  exit 1
-fi
-
-set -a
-. /etc/static-log-analysis.env
-set +a
-
-database_secret_file=/etc/static-log-analysis/secrets.env
-if [ ! -f "$database_secret_file" ] || [ -L "$database_secret_file" ]; then
-  echo "database DSN is not installed; run: sudo set-static-log-analysis-database-dsn" >&2
-  exit 1
-fi
-
-repository=/opt/static-log-analysis/repository
-if [ ! -d "$repository/.git" ]; then
-  install -d -m 0755 "$repository"
-  git -C "$repository" init
-  git -C "$repository" remote add origin "$SLA_REPOSITORY_URL"
-fi
-git -C "$repository" fetch --depth 1 origin "$SLA_REPOSITORY_REF"
-git -C "$repository" reset --hard FETCH_HEAD
-
-docker compose \
-  --project-name static-log-analysis-aws \
-  --env-file "$database_secret_file" \
-  --file /opt/static-log-analysis/compose.yaml \
-  build
-if [ "$SLA_DASHBOARD_ENABLED" = "true" ] && [ -f /etc/static-log-analysis/dashboard.env ]; then
-  docker compose \
-    --project-name static-log-analysis-aws \
-    --env-file "$database_secret_file" \
-    --env-file /etc/static-log-analysis/dashboard.env \
-    --file /opt/static-log-analysis/compose.yaml \
-    --profile dashboard \
-    build dashboard dashboard-auth-migrate
-fi
-systemctl restart static-log-analysis.service
-SCRIPT
-chmod 0750 /usr/local/sbin/deploy-static-log-analysis
-
 cat > /etc/systemd/system/static-log-analysis.service <<'UNIT'
 [Unit]
 Description=Static Log Analysis Service
@@ -321,9 +293,10 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/static-log-analysis.env
+EnvironmentFile=-/etc/static-log-analysis/release.env
 ExecStart=/usr/local/sbin/start-static-log-analysis
 ExecStop=/bin/bash -c 'STATIC_LOG_ANALYSIS_DATABASE_DSN=unused /usr/bin/docker compose --project-name static-log-analysis-aws --file /opt/static-log-analysis/compose.yaml down'
-TimeoutStartSec=30min
+TimeoutStartSec=5min
 TimeoutStopSec=2min
 
 [Install]

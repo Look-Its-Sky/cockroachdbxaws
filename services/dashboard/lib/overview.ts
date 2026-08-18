@@ -1,4 +1,5 @@
 import { GetQueueAttributesCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { getAgentHealth, getAgentInvestigations, type AgentComponentState, type AgentInvestigationState } from "./agent";
 import { analysisOverviewSchema, type AnalysisOverview } from "./schema";
 
 export type ComponentState<T> =
@@ -11,6 +12,8 @@ export interface DashboardOverview {
   cloudwatch: ComponentState<{ ready: boolean; metrics: Record<string, number> }>;
   outbox: ComponentState<{ ready: boolean }>;
   queues: ComponentState<{ available: number; inFlight: number; deadLetter: number }>;
+  agent: AgentComponentState<{ ready: boolean }>;
+  agentInvestigations: Record<string, AgentInvestigationState>;
 }
 
 const timeout = 4_000;
@@ -79,11 +82,17 @@ async function settle<T>(promise: Promise<T>): Promise<ComponentState<T>> {
 }
 
 export async function getDashboardOverview(): Promise<DashboardOverview> {
-  const [analysisState, cloudwatchState, outboxState, queueState] = await Promise.all([
-    settle(analysis()),
+  const analysisPromise = analysis();
+  const agentInvestigationsPromise = analysisPromise
+    .then((value) => getAgentInvestigations(value.recent_investigations.map((item) => item.investigation_id)))
+    .catch(() => ({}));
+  const [analysisState, cloudwatchState, outboxState, queueState, agentState, agentInvestigations] = await Promise.all([
+    settle(analysisPromise),
     settle(cloudwatch()),
     settle(worker(process.env.OUTBOX_HEALTH_URL)),
     settle(queues()),
+    getAgentHealth(),
+    agentInvestigationsPromise,
   ]);
   return {
     collectedAt: new Date().toISOString(),
@@ -91,7 +100,13 @@ export async function getDashboardOverview(): Promise<DashboardOverview> {
     cloudwatch: cloudwatchState,
     outbox: outboxState,
     queues: queueState,
+    agent: agentState,
+    agentInvestigations,
   };
+}
+
+export async function getAnalysisOverview(): Promise<ComponentState<AnalysisOverview>> {
+  return settle(analysis());
 }
 
 export { parseMetrics };

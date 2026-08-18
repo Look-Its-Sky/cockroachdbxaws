@@ -46,6 +46,16 @@ variable "instance_type" {
   default     = "t3.small"
 }
 
+variable "machine_image_id" {
+  description = "Region-specific Amazon Linux 2023 x86_64 AMI pinned for both EC2 hosts. Change only as a deliberate host replacement."
+  type        = string
+
+  validation {
+    condition     = can(regex("^ami-[0-9a-f]{17}$", var.machine_image_id))
+    error_message = "machine_image_id must be a modern 17-hex-character EC2 AMI ID."
+  }
+}
+
 variable "deploy_demo" {
   description = "Create a separate public OpenTelemetry Demo host and a watched CloudWatch payment-service log group."
   type        = bool
@@ -132,28 +142,6 @@ variable "root_volume_gib" {
   validation {
     condition     = var.root_volume_gib >= 20
     error_message = "root_volume_gib must be at least 20 GiB."
-  }
-}
-
-variable "repository_url" {
-  description = "Git repository the instance builds the service image from."
-  type        = string
-  default     = "https://github.com/Look-Its-Sky/cockroachdbxaws.git"
-
-  validation {
-    condition     = can(regex("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$", var.repository_url))
-    error_message = "repository_url must be an HTTPS GitHub clone URL ending in .git."
-  }
-}
-
-variable "repository_ref" {
-  description = "Branch, tag, or commit fetched and built by the instance. Pin a commit for a repeatable demo."
-  type        = string
-  default     = "Static-Log-Analysis"
-
-  validation {
-    condition     = can(regex("^[A-Za-z0-9._/-]+$", var.repository_ref))
-    error_message = "repository_ref contains unsupported characters."
   }
 }
 

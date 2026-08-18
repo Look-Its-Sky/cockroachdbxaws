@@ -1,0 +1,88 @@
+# Investigation-only local integration. Start the static-analysis stack first:
+#
+#   docker compose --env-file services/static-log-analysis/.env \
+#     -f services/static-log-analysis/compose.yaml up -d
+#   cp .env.agent-local.example .env.agent-local
+#   docker compose --env-file .env.agent-local \
+#     -f compose.local-integration.yaml up -d --build
+#
+# This joins the existing static-log-analysis Compose network and database, but
+# creates a separate logical database for writable agent state. It never mounts
+# the host Docker socket, so remediation is deliberately disabled here.
+
+name: agent-local-integration
+
+services:
+  agent-db-init:
+    image: cockroachdb/cockroach:v26.2.5@sha256:771325a0586bf61d53322d24f5a6de8962568b0fc181fa45db364278e5961282
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        until cockroach sql --insecure --host=cockroachdb:26257 --execute='SELECT 1' >/dev/null 2>&1;
+        do sleep 2; done;
+        cockroach sql --insecure --host=cockroachdb:26257
+        --execute='CREATE DATABASE IF NOT EXISTS agent_space;
+        CREATE USER IF NOT EXISTS agent_context_reader';
+        cockroach sql --insecure --host=cockroachdb:26257 --database=static_log_analysis
+        --execute='GRANT CONNECT ON DATABASE static_log_analysis TO agent_context_reader;
+        GRANT USAGE ON SCHEMA public TO agent_context_reader;
+        GRANT SELECT ON TABLE investigations, incident_families, investigation_contexts TO agent_context_reader'
+    networks: [static-analysis]
+    restart: "no"
+
+  agent-mcp:
+    image: us-docker.pkg.dev/releases-prod/cockroachdb-mcp-server/cockroachdb-mcp-server:0.1.0
+    environment:
+      CRDB_DATABASE_URL: postgresql://root@cockroachdb:26257/static_log_analysis?sslmode=disable
+      CRDB_MCP_ALLOW_INSECURE_DB: "true"
+      CRDB_MCP_ALLOW_INSECURE_HTTP: "true"
+      CRDB_MCP_TRANSPORT: http
+      CRDB_MCP_HTTP_LISTEN_ADDR: 0.0.0.0:8443
+      CRDB_MCP_BEARER_TOKEN: local-agent-mcp-token
+      CRDB_MCP_ENABLE_WRITE_QUERIES: "false"
+    ports:
+      - 127.0.0.1:${AGENT_MCP_PORT:-18443}:8443
+    networks: [static-analysis]
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent_space
+      dockerfile: Dockerfile
+    image: agent-space:local-integration
+    env_file:
+      - path: .env.agent-local
+        required: false
+    environment:
+      DATABASE_URL: postgresql://root@cockroachdb:26257/agent_space?sslmode=disable
+      ANALYSIS_DATABASE_URL: postgresql://agent_context_reader@cockroachdb:26257/static_log_analysis?sslmode=disable
+      SQS_QUEUE_URL: http://localstack:4566/queue/${SLA_REGION:-us-east-1}/000000000000/static-log-analysis
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: ${SLA_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AGENT_TENANT_ID: ${SLA_TENANT_ID:-local}
+      AGENT_CLASSIFICATION: SENSITIVE
+      COCKROACH_MCP_URL: http://agent-mcp:8443
+      COCKROACH_API_KEY: local-agent-mcp-token
+      COCKROACH_CLUSTER_ID: ""
+      AGENT_ALLOW_WRITE_TOOLS: "false"
+      API_TOKEN: ${API_TOKEN:-local-agent-token}
+      CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      REMEDIATION_ENABLED: "false"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      agent-db-init:
+        condition: service_completed_successfully
+      agent-mcp:
+        condition: service_started
+    ports:
+      - 127.0.0.1:${AGENT_API_PORT:-18081}:8080
+    networks: [static-analysis]
+    restart: unless-stopped
+
+networks:
+  static-analysis:
+    external: true
+    name: static-log-analysis_default

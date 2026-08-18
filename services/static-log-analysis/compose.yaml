@@ -180,4 +180,8 @@ networks:
 volumes:
   cockroach-data:
   analysis-journal:
+    # The default preserves the established Compose volume name. A local smoke
+    # can select a new name without deleting or renaming a large retained
+    # journal that would otherwise have to replay before readiness.
+    name: ${SLA_ANALYSIS_JOURNAL_VOLUME:-static-log-analysis_analysis-journal}
   collector-queue:

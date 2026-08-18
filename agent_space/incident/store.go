@@ -22,7 +22,7 @@ var ErrNotFound = errors.New("incident: no context row for this incident and ver
 // what the producer recorded about an incident, one row of incident_context
 type Context struct {
 	IncidentID     string
-	ContextVersion int
+	ContextVersion int64
 	ServiceID      string
 	Environment    string
 	Severity       string

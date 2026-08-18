@@ -70,3 +70,57 @@ processing.
 The dashboard does not change the regional boundary. It runs on the analysis
 host, reads same-region SQS metadata through the instance profile, and calls
 the Go process over the local Compose network.
+
+## Read-only agent visibility
+
+The first agent dashboard slice correlates each bounded recent analysis
+investigation with the agent's authenticated `GET /agent/:id` journal lookup.
+The overview shows agent availability, delivery/run state, and a terminal
+verdict. `/investigations/:id` shows:
+
+- the safe service, environment, severity, rule trigger, detection state, and
+  queue timestamp that caused the assignment;
+- agent status, decision, declared confidence, verdict source, iteration and
+  grounding-source counts, and timestamps; and
+- at most 50 trace entries containing only tool name, iteration, duration,
+  failure boolean, and categorical failure cause.
+
+`AGENT_API_URL` and `AGENT_API_TOKEN` are server-only settings. The client
+applies a four-second timeout, a 256 KiB response ceiling, schema validation,
+and a maximum fan-out of ten investigation lookups. It strips model prose,
+grounding text, tool arguments, raw tool input, tool output, provider errors,
+and raw incident context before rendering. A missing or unavailable agent
+degrades only the agent fields.
+
+The overview labels terminal verdicts as recommendations, never as executed
+actions. A `ROLLBACK` result without a separate remediation record therefore
+renders as `Not run — recommendation only`; `done` means the investigation
+completed, not that code or a deployment changed. An inferred verdict with no
+commit remains visibly weaker than a declared, grounded result.
+
+`/remediations` and `/remediations/:id` complete the read-only remediation
+slice. They show bounded repository capability metadata, recent execution
+records, triage, ranked candidate diffs, factual sandbox-stage results, and the
+existence and indexing state of an engineer decision. The server strips
+executable repository commands, raw build logs, provider errors, full source
+files, and embedded decision documents. Responses remain capped at 256 KiB,
+lists at 50 runs, candidates at six, and an individual diff at 96 KiB.
+
+`agent_space` initializes the durable remediation read store even when
+`REMEDIATION_ENABLED=false`, so the dashboard can distinguish an empty history
+from an unavailable API. All remediation, decision, and pull-request mutation
+routes remain disabled unless the sandbox runner initialized successfully.
+
+The footer displays `SLA_RELEASE_SHA` only when it is a full lowercase
+40-character commit. A branch, short SHA, or malformed value is rendered as
+`unidentified` rather than being presented as an immutable deployment identity.
+
+Mutating controls and engineer-started agents remain later phases and are not
+implied by these read-only pages. In-flight SQS investigations now persist at
+most 50 categorical progress events in the existing agent result JSON. An event
+contains only stage (`context`, `model`, `tool`, or `verdict`), status,
+iteration, optional tool name and failure category, and timestamp. It never
+contains prompts, reasoning, model prose, tool arguments, tool output, raw
+errors, or context. The dashboard polls this durable timeline through the same
+authenticated investigation lookup; no private process log or streaming model
+channel is exposed.

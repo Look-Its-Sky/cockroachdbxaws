@@ -1,6 +1,7 @@
 package incident
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,36 @@ func sampleAssignment() queue.Assignment {
 		Environment:     "production",
 		Severity:        "error",
 		ContextVersion:  1,
+	}
+}
+
+const analysisSnapshot = `{"kind":"map","value":{"schema_version":{"kind":"string","value":"1.0"},"incident_id":{"kind":"string","value":"6424cd115aa6f4be24f943bd4c10e776dbf4459c267fda69520dcd548831b5ed"},"generation":{"kind":"int","value":3387192194469240033},"record_id":{"kind":"string","value":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"rule_id":{"kind":"string","value":"ordinary_error_v1"},"threshold":{"kind":"int","value":5},"window_seconds":{"kind":"int","value":300},"representative_error":{"kind":"string","value":"ERROR settle.write pool exhausted"}}}`
+
+func TestContextFromAnalysisSnapshot(t *testing.T) {
+	a := sampleAssignment()
+	a.IncidentGen = 3387192194469240033
+	created := time.Date(2026, 8, 9, 0, 31, 12, 0, time.UTC)
+
+	got, err := contextFromAnalysisSnapshot(a, []byte(analysisSnapshot), created)
+	if err != nil {
+		t.Fatalf("contextFromAnalysisSnapshot: %v", err)
+	}
+	if got.IncidentID != a.IncidentID || got.ContextVersion != a.ContextVersion {
+		t.Fatalf("identity/version = %q/%d", got.IncidentID, got.ContextVersion)
+	}
+	if got.Summary != "Rule ordinary_error_v1 reached 5 matching errors within 300 seconds." {
+		t.Errorf("summary = %q", got.Summary)
+	}
+	if got.LogExcerpt != "ERROR settle.write pool exhausted" || !got.DetectedAt.Equal(created) {
+		t.Errorf("excerpt/time = %q/%s", got.LogExcerpt, got.DetectedAt)
+	}
+}
+
+func TestContextFromAnalysisSnapshotRejectsIdentityDrift(t *testing.T) {
+	a := sampleAssignment()
+	a.IncidentGen = 99
+	if _, err := contextFromAnalysisSnapshot(a, []byte(analysisSnapshot), time.Now().UTC()); !errors.Is(err, ErrInvalidContext) {
+		t.Fatalf("error = %v, want ErrInvalidContext", err)
 	}
 }
 

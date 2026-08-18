@@ -55,6 +55,8 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "http://localhost:4566")
 	t.Setenv("AWS_REGION", "eu-west-2")
 	t.Setenv("WORKER_RUN_TIMEOUT", "90s")
+	t.Setenv("AGENT_TENANT_ID", "tenant-a")
+	t.Setenv("AGENT_CLASSIFICATION", "SENSITIVE")
 
 	cfg := ConfigFromEnv()
 	if cfg.Endpoint != "http://localhost:4566" {
@@ -65,6 +67,9 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	}
 	if cfg.RunTimeout != 90*time.Second {
 		t.Errorf("run timeout = %s, want 90s", cfg.RunTimeout)
+	}
+	if !cfg.BoundaryConfigured() || cfg.Boundary() != (Boundary{Region: "eu-west-2", TenantID: "tenant-a", Classification: "SENSITIVE"}) {
+		t.Errorf("boundary = %+v, want configured deployment scope", cfg.Boundary())
 	}
 }
 

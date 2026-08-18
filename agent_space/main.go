@@ -25,6 +25,7 @@ func main() {
 	utils.LoadConfig()
 
 	initStore()
+	defer pool.Close()
 	// before the agent: it recalls past decisions alongside past incidents
 	initPrecedents()
 	initLLM()
@@ -35,6 +36,9 @@ func main() {
 	// before the worker: the worker only hands verdicts over if this came up
 	initRemediation()
 	initWorker()
+	if analysisPool != nil {
+		defer analysisPool.Close()
+	}
 
 	routes.VectorStore = store
 	routes.Model = model
@@ -42,6 +46,7 @@ func main() {
 	routes.SREAgent = sreAgent
 	routes.Results = sqsResults
 	routes.Remediation = remediator
+	routes.RemediationWritesEnabled = remediator != nil
 	routes.Solutions = solutions
 	routes.Repos = repos
 	routes.Publisher = publisher

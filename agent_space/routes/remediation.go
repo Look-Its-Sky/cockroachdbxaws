@@ -19,6 +19,13 @@ import (
 
 const remediationUnavailable = "Remediation is not running. It needs a container runtime, a database and a repository mapping"
 
+const remediationWritesUnavailable = "Remediation writes are disabled; read-only investigation and remediation evidence remain available"
+
+// RemediationWritesEnabled is set only when the process has initialized the
+// bounded sandbox runner. Keeping this separate from Solutions lets a
+// deployment expose durable read models while REMEDIATION_ENABLED=false.
+var RemediationWritesEnabled bool
+
 const solutionsUnavailable = "Proposed fixes are not being stored. Check the database connection"
 
 // how long a read for the UI may take. These are single queries; the long work
@@ -110,6 +117,10 @@ func RemediationFor(c *gin.Context) {
 // proposes fixes for an investigation that already has a verdict; the queue
 // does this automatically, so this is the button and the retry
 func StartRemediation(c *gin.Context) {
+	if !RemediationWritesEnabled {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": remediationWritesUnavailable})
+		return
+	}
 	if Remediation == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": remediationUnavailable})
 		return
@@ -186,6 +197,10 @@ func summaryFor(c *gin.Context, record worker.Record) string {
 // the engineer picking a candidate; picking is what opens
 // the draft; nothing before this point touches the repository.
 func OpenPullRequest(c *gin.Context) {
+	if !RemediationWritesEnabled {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": remediationWritesUnavailable})
+		return
+	}
 	if Solutions == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": solutionsUnavailable})
 		return
@@ -281,6 +296,10 @@ type RejectionRequest struct {
 // stores an engineer's verdict and puts it where the next similar incident will
 // find it; the only point in the pipeline where human judgement is captured
 func RecordDecision(c *gin.Context) {
+	if !RemediationWritesEnabled {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": remediationWritesUnavailable})
+		return
+	}
 	if Solutions == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": solutionsUnavailable})
 		return

@@ -1,17 +1,17 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useTransition } from "react";
+import { useCallback, useEffect, useTransition } from "react";
 
 export function RefreshControl() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const refresh = () => startTransition(() => router.refresh());
+  const refresh = useCallback(() => startTransition(() => router.refresh()), [router]);
 
   useEffect(() => {
     const timer = window.setInterval(refresh, 10_000);
     return () => window.clearInterval(timer);
-  });
+  }, [refresh]);
 
   return (
     <button className="refresh" onClick={refresh} disabled={pending} aria-label="Refresh dashboard data">

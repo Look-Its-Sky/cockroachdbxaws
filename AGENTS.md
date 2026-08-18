@@ -88,6 +88,80 @@ projection, unlabelled metrics, readiness, and SQS queue attributes, has no
 CockroachDB credential, and stays in an optional Compose profile so dashboard
 configuration cannot block analysis startup.
 
+The dashboard's local agent slice now distinguishes recommendations from
+executed remediation, includes bounded repository/remediation list and detail
+views, and renders a durable maximum-50-event categorical progress timeline.
+The agent keeps read-only remediation history available while execution is
+forced off; mutation routes remain unavailable without an initialized sandbox.
+
+The dashboard now also has the first Phase 5 agent read model: its server calls
+authenticated `/ping` and `/agent/:id`, correlates at most ten recent detector
+investigations with agent state, and renders a detail page containing only safe
+signal metadata, verdict/timing counts, and a stripped tool-name trace. Model
+prose, tool inputs/output, context, provider errors, and the agent token never
+reach the browser. Repository/remediation visibility and all mutations remain
+unfinished.
+
+The approved investigation-only agent integration is implemented but not yet
+deployed to AWS. `agent_space` now strictly admits the closed assignment envelope and
+exact SQS attributes against a trusted region/tenant/classification boundary,
+then reads the immutable `SafeValue` snapshot through a distinct read-only
+analysis database connection. Terraform provides an exact-queue App Runner
+consumer role, and the agent deployer pins one instance and forces remediation
+off. Database grants, App Runner deployment, and end-to-end release evidence
+remain operator work; see `docs/agent-sqs-deployment.md`.
+
+AWS deployment follow-up on 2026-08-17 applied the exact-queue App Runner
+runtime role and policy and left Terraform at zero drift. The application
+cutover was not accepted: the on-host dashboard `next build` hit SSM's one-hour
+timeout, and recovery produced outbox readiness but not CloudWatch readiness or
+dashboard reachability. The agent application was not launched because the
+production secret/database input file was absent. The sanitized evidence and
+the required prebuilt-image milestone are in
+`docs/deployment/aws-release-attempt-2026-08-17.md`.
+
+The prebuilt-image milestone is implemented and its infrastructure/artifacts
+are deployed, but the application is not yet accepted on AWS.
+Terraform owns separate immutable, scan-on-push ECR repositories for the
+analysis, dashboard, and dashboard-admin artifacts; the host has repository-
+scoped pull access. Production Compose now requires digest-pinned images, the
+off-host publisher builds every artifact from one clean commit, and the host
+cutover performs pre-pull verification, migrations, bounded health checks, and
+automatic rollback to the prior release file. The ECR apply, publication, and
+in-place file refresh completed. The first cutover did not: migrations and
+outbox succeeded, CloudWatch never exposed readiness, the dashboard stayed
+held, and the host's SSM channel stopped producing fresh heartbeats before the
+container startup cause could be collected. The failed candidate remains the
+root-only release selection because no older digest release exists. See the
+immutable-image follow-up in `docs/deployment/aws-release-attempt-2026-08-17.md`.
+The idempotent bootstrap follow-up is committed but intentionally unapplied;
+its final live plan is one in-place metadata change with no create, destroy, or
+replacement action, and applying it waits on management-channel recovery.
+
+AWS follow-up on 2026-08-18 recovered the management channel and traced the
+CloudWatch readiness failure to the full Pebble journal verifier retaining every
+decoded envelope during startup. The repair retains only bounded verification
+metadata while preserving the corruption checks and gives this recovery path a
+distinct bounded health window. A first repaired cutover showed that the
+remaining whole-journal cross-reference maps could still starve the 2 GiB host;
+the follow-up now validates those relationships with constant-workspace Pebble
+lookups. Publication, cutover, and public dashboard acceptance remain release
+evidence to collect; see
+`docs/deployment/aws-release-attempt-2026-08-17.md`.
+
+Local integration is available through `compose.local-integration.yaml`. It
+joins the static-analysis Compose network, creates a separate agent database
+and a context-reader user limited to the three safe projection tables, binds
+the API to loopback port 18081, and forces remediation off without mounting the
+Docker socket. The detector-to-SQS-to-live-context path is demonstrated. A
+GPU-backed local run using `qwen2.5-coder:14b-instruct` and
+`nomic-embed-text` also completed and persisted a one-iteration `ROLLBACK`
+verdict. `compose.local-models.yaml` is the loopback-only Linux overlay for
+hosts whose firewall drops Docker bridge traffic. Automatic remediation is
+still unproven and remains disabled. See
+`docs/deployment/local-agent-integration-readiness.md` and
+`docs/deployment/local-model-hosting.md`.
+
 The AWS CloudWatch pull path is the combined `cloudwatch` role. Its poll and
 process workers share one journal, checkpoints live on a second Docker volume,
 and the EC2 instance profile grants exact-log-group `logs:FilterLogEvents` plus

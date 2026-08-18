@@ -129,13 +129,37 @@ func (s *Store) Finish(a queue.Assignment, res agent.Result, runErr error) {
 	now := time.Now().UTC()
 	rec.FinishedAt = &now
 	// the trace is worth keeping even on failure: it shows how far the run got
+	progress := append([]agent.Progress(nil), rec.Result.Progress...)
 	rec.Result = res
+	rec.Result.Progress = progress
 	rec.Status = StatusDone
 	if runErr != nil {
 		rec.Status = StatusFailed
 		rec.Error = runErr.Error()
 	}
 
+	snapshot := *rec
+	s.mu.Unlock()
+
+	s.mirror(snapshot)
+}
+
+// Progress appends one content-free event to a running investigation and
+// mirrors it durably. Events for a terminal or unknown record are ignored.
+func (s *Store) Progress(a queue.Assignment, event agent.Progress) {
+	s.mu.Lock()
+	rec, ok := s.byID[a.InvestigationID]
+	if !ok || rec.Status != StatusRunning {
+		s.mu.Unlock()
+		return
+	}
+	if event.At.IsZero() {
+		event.At = time.Now().UTC()
+	}
+	rec.Result.Progress = append(rec.Result.Progress, event)
+	if extra := len(rec.Result.Progress) - agent.MaxProgressEvents; extra > 0 {
+		rec.Result.Progress = append([]agent.Progress(nil), rec.Result.Progress[extra:]...)
+	}
 	snapshot := *rec
 	s.mu.Unlock()
 

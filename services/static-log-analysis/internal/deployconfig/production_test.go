@@ -43,6 +43,13 @@ func TestAWSComposeRunsOnlyTheCloudWatchProductionPath(t *testing.T) {
 	}
 }
 
+func TestLocalComposeCanSelectAFreshJournalWithoutDeletingTheOldVolume(t *testing.T) {
+	compose := readProductionFile(t, "compose.yaml")
+	if !strings.Contains(compose, `name: ${SLA_ANALYSIS_JOURNAL_VOLUME:-static-log-analysis_analysis-journal}`) {
+		t.Fatal("local Compose cannot select a fresh named journal volume for a bounded smoke deployment")
+	}
+}
+
 func TestAWSInfrastructureSeparatesPrivateAnalysisFromOptionalDemo(t *testing.T) {
 	main := readProductionFile(t, "infra/aws/main.tf")
 	for _, required := range []string{
@@ -107,13 +114,31 @@ func TestAWSBootstrapCompressesEmbeddedDeploymentFiles(t *testing.T) {
 	for _, required := range []string{
 		`base64gzip(file("${path.module}/../../deploy/aws/compose.yaml"))`,
 		`base64gzip(file("${path.module}/../../deploy/aws/Caddyfile"))`,
+		`base64gzip(file("${path.module}/../../deploy/aws/deploy-images.sh"))`,
 	} {
 		if !strings.Contains(main, required) {
 			t.Errorf("AWS infrastructure does not compress embedded deployment file through %q", required)
 		}
 	}
-	if strings.Count(bootstrap, "base64 --decode | gzip --decompress") != 2 {
-		t.Fatal("AWS bootstrap does not decompress both embedded deployment files")
+	if strings.Count(bootstrap, "base64 --decode | gzip --decompress") != 3 {
+		t.Fatal("AWS bootstrap does not decompress all embedded deployment files")
+	}
+}
+
+func TestAWSBootstrapRefreshSkipsSatisfiedHostTooling(t *testing.T) {
+	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
+	for _, required := range []string{
+		`command -v docker`,
+		`command -v aws`,
+		`command -v openssl`,
+		`command -v curl`,
+		`dnf install -y docker awscli-2 openssl curl`,
+		`printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check >/dev/null 2>&1 || {`,
+		`chmod 0755 "$compose_plugin"`,
+	} {
+		if !strings.Contains(bootstrap, required) {
+			t.Errorf("in-place bootstrap refresh does not contain %q", required)
+		}
 	}
 }
 
@@ -122,6 +147,26 @@ func TestAWSServiceBootstrapChangesPreserveTheEncryptedInstanceDisk(t *testing.T
 	service := terraformResourceBlock(t, main, `resource "aws_instance" "service"`)
 	if !strings.Contains(service, "user_data_replace_on_change = false") {
 		t.Fatal("service bootstrap changes can replace the instance and delete its local durable state")
+	}
+}
+
+func TestAWSInstancesUseAnExplicitPinnedMachineImage(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	variables := readProductionFile(t, "infra/aws/variables.tf")
+	if strings.Contains(main, `data "aws_ami"`) || strings.Contains(main, "most_recent = true") {
+		t.Fatal("a moving most-recent AMI can replace stateful hosts during an application deployment")
+	}
+	if !strings.Contains(variables, `variable "machine_image_id"`) {
+		t.Fatal("AWS infrastructure does not require an explicitly pinned machine image")
+	}
+	for _, resource := range []string{
+		`resource "aws_instance" "service"`,
+		`resource "aws_instance" "demo"`,
+	} {
+		instance := terraformResourceBlock(t, main, resource)
+		if !strings.Contains(instance, "ami                         = var.machine_image_id") {
+			t.Errorf("%s does not use the explicitly pinned machine image", resource)
+		}
 	}
 }
 
@@ -146,13 +191,12 @@ func TestBootstrapRequiresARootOnlyComposeSecretsFile(t *testing.T) {
 		`--env-file "$database_secret_file"`,
 		`STATIC_LOG_ANALYSIS_DATABASE_DSN='`,
 		"set-static-log-analysis-database-dsn",
-		"deploy-static-log-analysis",
+		"deploy-static-log-analysis-images",
 		"read -r -s",
 		"STATIC_LOG_ANALYSIS_DATABASE_DSN",
 		"sslrootcert=system",
 		"autocommit_before_ddl=false",
 		"sed -E",
-		"docker-buildx",
 		"sha256sum --check",
 		"systemctl enable static-log-analysis.service",
 	} {
@@ -175,38 +219,132 @@ func TestBootstrapRequiresARootOnlyComposeSecretsFile(t *testing.T) {
 	}
 }
 
-func TestAWSServiceRestartDoesNotRedeploySource(t *testing.T) {
+func TestAWSServiceRestartUsesOnlyDigestPinnedImages(t *testing.T) {
 	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
 	startMarker := "cat > /usr/local/sbin/start-static-log-analysis <<'SCRIPT'"
-	deployMarker := "cat > /usr/local/sbin/deploy-static-log-analysis <<'SCRIPT'"
 	unitMarker := "cat > /etc/systemd/system/static-log-analysis.service <<'UNIT'"
 
-	start := scriptBetween(t, bootstrap, startMarker, deployMarker)
-	for _, forbidden := range []string{"git ", "--build", "SLA_REPOSITORY_URL", "SLA_REPOSITORY_REF"} {
+	start := scriptBetween(t, bootstrap, startMarker, unitMarker)
+	for _, forbidden := range []string{"git ", "--build", "SLA_REPOSITORY_URL", "docker compose build"} {
 		if strings.Contains(start, forbidden) {
 			t.Errorf("routine service startup can redeploy source through %q", forbidden)
 		}
 	}
-	if !strings.Contains(start, "--no-build") {
-		t.Fatal("routine service startup does not require the already-deployed image")
-	}
-
-	deploy := scriptBetween(t, bootstrap, deployMarker, unitMarker)
 	for _, required := range []string{
-		`git -C "$repository" fetch --depth 1 origin "$SLA_REPOSITORY_REF"`,
-		`git -C "$repository" reset --hard FETCH_HEAD`,
-		"docker compose",
-		"build",
-		"systemctl restart static-log-analysis.service",
+		"/etc/static-log-analysis/release.env",
+		"SLA_ANALYSIS_IMAGE",
+		"SLA_DASHBOARD_IMAGE",
+		"SLA_DASHBOARD_ADMIN_IMAGE",
+		"@sha256:",
+		"--no-build",
 	} {
-		if !strings.Contains(deploy, required) {
-			t.Errorf("explicit deployment helper does not contain %q", required)
+		if !strings.Contains(start, required) {
+			t.Errorf("routine service startup does not enforce %q", required)
+		}
+	}
+	if !strings.Contains(bootstrap, "EnvironmentFile=-/etc/static-log-analysis/release.env") {
+		t.Fatal("systemd stop and start do not share the selected digest release environment")
+	}
+}
+
+func TestAWSImagePublisherBuildsEveryArtifactFromOneCleanCommit(t *testing.T) {
+	publisher := readProductionFile(t, "scripts/publish-aws-images.sh")
+	for _, required := range []string{
+		`git -C "$repository_root" rev-parse HEAD`,
+		`git -C "$repository_root" status --porcelain`,
+		`export DOCKER_CONFIG=$docker_config`,
+		`buildx-v0.34.1.linux-amd64`,
+		`sha256sum --check`,
+		`--platform linux/amd64`,
+		`existing_digest=$(published_digest "$repository_url")`,
+		`reusing the existing immutable commit artifact`,
+		`publish_image "$analysis_repository" "$service_root" ""`,
+		`publish_image "$dashboard_repository" "$repository_root/services/dashboard" runtime`,
+		`publish_image "$dashboard_admin_repository" "$repository_root/services/dashboard" admin`,
+		`aws ecr describe-images`,
+		`--push`,
+	} {
+		if !strings.Contains(publisher, required) {
+			t.Errorf("off-host image publisher does not contain %q", required)
+		}
+	}
+}
+
+func TestAWSComposeRequiresPrebuiltImmutableImages(t *testing.T) {
+	compose := readProductionFile(t, "deploy/aws/compose.yaml")
+	for _, required := range []string{
+		"${SLA_ANALYSIS_IMAGE:?",
+		"${SLA_DASHBOARD_IMAGE:?",
+		"${SLA_DASHBOARD_ADMIN_IMAGE:?",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Errorf("production Compose does not require %q", required)
+		}
+	}
+	if strings.Contains(compose, "build:") {
+		t.Fatal("production Compose still builds application source on the stateful host")
+	}
+}
+
+func TestAWSRegistryIsImmutableAndPullAccessIsRepositoryScoped(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	for _, required := range []string{
+		`resource "aws_ecr_repository" "release"`,
+		`image_tag_mutability = "IMMUTABLE"`,
+		`scan_on_push = true`,
+		`"analysis"`,
+		`"dashboard"`,
+		`"dashboard-admin"`,
+		`actions   = ["ecr:GetAuthorizationToken"]`,
+		`resources = ["*"]`,
+		`"ecr:BatchCheckLayerAvailability"`,
+		`"ecr:GetDownloadUrlForLayer"`,
+		`"ecr:BatchGetImage"`,
+		`resources = [for repository in aws_ecr_repository.release : repository.arn]`,
+	} {
+		if !strings.Contains(main, required) {
+			t.Errorf("immutable registry contract does not contain %q", required)
+		}
+	}
+}
+
+func TestAWSImageCutoverIsBoundedAndRollsBack(t *testing.T) {
+	deployer := readProductionFile(t, "deploy/aws/deploy-images.sh")
+	for _, required := range []string{
+		`@sha256:[0-9a-f]{64}$`,
+		`aws ecr get-login-password`,
+		`docker pull "$analysis_image"`,
+		`docker pull "$dashboard_image"`,
+		`docker pull "$dashboard_admin_image"`,
+		`previous_release_file`,
+		`default_health_attempts=24`,
+		`cloudwatch_health_attempts=240`,
+		`restore_previous_release`,
+		`systemctl restart static-log-analysis.service`,
+	} {
+		if !strings.Contains(deployer, required) {
+			t.Errorf("image deployment helper does not contain %q", required)
+		}
+	}
+	compose := readProductionFile(t, "deploy/aws/compose.yaml")
+	if !strings.Contains(compose, "start_period: 15m") {
+		t.Fatal("CloudWatch health can fail before a large durable journal finishes startup verification")
+	}
+	for _, forbidden := range []string{"git ", "docker compose build", "latest"} {
+		if strings.Contains(deployer, forbidden) {
+			t.Errorf("image deployment helper contains mutable source deployment through %q", forbidden)
 		}
 	}
 }
 
 func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) {
 	main := readProductionFile(t, "infra/aws/main.tf")
+	servicePolicy := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "service"`,
+		`resource "aws_iam_role_policy" "service"`,
+	)
 	compose := readProductionFile(t, "deploy/aws/compose.yaml")
 	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
 	caddy := readProductionFile(t, "deploy/aws/Caddyfile")
@@ -222,7 +360,7 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 		}
 	}
 	for _, forbidden := range []string{`sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`} {
-		if strings.Contains(main, forbidden) {
+		if strings.Contains(servicePolicy, forbidden) {
 			t.Errorf("dashboard can mutate the assignment queue through %q", forbidden)
 		}
 	}
@@ -236,6 +374,9 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 		"BETTER_AUTH_SECRET",
 		"BETTER_AUTH_DATABASE_PATH",
 		"ANALYSIS_OVERVIEW_URL",
+		"AGENT_API_URL",
+		"AGENT_API_TOKEN",
+		"SLA_RELEASE_SHA",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("production Compose does not contain %q", required)
@@ -255,9 +396,9 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 			t.Errorf("dashboard bootstrap does not contain %q", required)
 		}
 	}
-	for _, required := range []string{"fallocate -l 2G /swapfile", "swapon /swapfile", "/swapfile none swap sw 0 0"} {
-		if !strings.Contains(bootstrap, required) {
-			t.Errorf("dashboard build memory safeguard does not contain %q", required)
+	for _, forbidden := range []string{"docker buildx", "docker compose build", "/swapfile"} {
+		if strings.Contains(bootstrap, forbidden) {
+			t.Errorf("dashboard bootstrap still builds source on the host through %q", forbidden)
 		}
 	}
 	for _, required := range []string{"reverse_proxy dashboard:3000", "Strict-Transport-Security", "X-Frame-Options"} {
@@ -289,6 +430,46 @@ func TestPublicDashboardIsAuthenticatedAndReadOnlyAtItsBoundaries(t *testing.T) 
 			if strings.Contains(contents, forbidden) {
 				t.Errorf("%s still contains obsolete hosted-auth setting %q", file, forbidden)
 			}
+		}
+	}
+}
+
+func TestAgentRuntimeRoleCanOnlyConsumeAssignments(t *testing.T) {
+	main := readProductionFile(t, "infra/aws/main.tf")
+	trust := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "agent_runtime_trust"`,
+		`resource "aws_iam_role" "agent_runtime"`,
+	)
+	if !strings.Contains(trust, `identifiers = ["tasks.apprunner.amazonaws.com"]`) {
+		t.Error("agent runtime role is not restricted to the App Runner task service")
+	}
+
+	policy := scriptBetween(
+		t,
+		main,
+		`data "aws_iam_policy_document" "agent_runtime"`,
+		`resource "aws_iam_role_policy" "agent_runtime"`,
+	)
+	for _, required := range []string{
+		`"sqs:ReceiveMessage"`,
+		`"sqs:DeleteMessage"`,
+		`"sqs:ChangeMessageVisibility"`,
+		`"sqs:GetQueueAttributes"`,
+		`resources = [aws_sqs_queue.assignments.arn]`,
+	} {
+		if !strings.Contains(policy, required) {
+			t.Errorf("agent runtime policy does not contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`"sqs:SendMessage"`,
+		`aws_sqs_queue.dead_letter.arn`,
+		`Resource = "*"`,
+	} {
+		if strings.Contains(policy, forbidden) {
+			t.Errorf("agent runtime policy contains over-broad capability %q", forbidden)
 		}
 	}
 }

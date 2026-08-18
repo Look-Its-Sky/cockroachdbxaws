@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	internalv1 "github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/gen/internalv1"
 	"github.com/Look-Its-Sky/cockroachdbxaws/services/static-log-analysis/internal/model"
@@ -24,6 +25,25 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestStartupVerificationMetadataCannotRetainTheDurableEnvelope(t *testing.T) {
+	stored := storedRecord{
+		state:      StatePending,
+		priority:   PriorityHigh,
+		received:   time.Unix(1, 0).UTC(),
+		claimOwner: strings.Repeat("o", MaxOwnerBytes),
+		claimToken: "claim:" + strings.Repeat("a", 64),
+		envelope:   make([]byte, 1<<20),
+	}
+
+	metadata := startupVerificationRecordFrom(stored)
+	if unsafe.Sizeof(metadata) > 256 {
+		t.Fatalf("startup verification metadata grew beyond its bounded record footprint: %d bytes", unsafe.Sizeof(metadata))
+	}
+	if metadata.state != stored.state || metadata.priority != stored.priority || !metadata.received.Equal(stored.received) {
+		t.Fatalf("startup verification metadata lost required state: %+v", metadata)
+	}
+}
 
 func internalConfig(dir string, c *fakeclock.Clock) Config {
 	return Config{Dir: dir, Owner: "owner", TenantID: "tenant", Region: builders.DefaultRegion, Classification: "SENSITIVE", Clock: c, Validator: redact.MinimalPolicy(), MaxBytes: 64 << 20, MinFreeBytes: 1, FreeSpace: func(string) (uint64, error) { return math.MaxUint64, nil }}

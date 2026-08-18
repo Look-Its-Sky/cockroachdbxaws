@@ -20,6 +20,18 @@ output "service_role_arn" {
   value = aws_iam_role.service.arn
 }
 
+output "agent_runtime_role_arn" {
+  description = "App Runner instance role that can consume only the assignment queue."
+  value       = aws_iam_role.agent_runtime.arn
+}
+
+output "release_image_repositories" {
+  description = "Private immutable repositories for the analysis, dashboard, and dashboard-admin release artifacts."
+  value = {
+    for role, repository in aws_ecr_repository.release : role => repository.repository_url
+  }
+}
+
 output "start_session_command" {
   value = "aws ssm start-session --region ${var.region} --target ${aws_instance.service.id}"
 }

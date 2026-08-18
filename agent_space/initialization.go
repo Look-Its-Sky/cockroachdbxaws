@@ -28,14 +28,15 @@ var (
 	mcpSess  *mcp.Session
 	sreAgent *agent.Runner
 
-	pool       *pgxpool.Pool
-	sqsWorker  *worker.Worker
-	sqsResults *worker.Store
-	repos      *remediation.Repositories
-	remediator *remediation.Runner
-	solutions  *remediation.Solutions
-	publisher  *remediation.Publisher
-	precedents *remediation.Precedents
+	pool         *pgxpool.Pool
+	analysisPool *pgxpool.Pool
+	sqsWorker    *worker.Worker
+	sqsResults   *worker.Store
+	repos        *remediation.Repositories
+	remediator   *remediation.Runner
+	solutions    *remediation.Solutions
+	publisher    *remediation.Publisher
+	precedents   *remediation.Precedents
 )
 
 const schemaLoadTimeout = 60 * time.Second
@@ -223,8 +224,35 @@ func initWorker() {
 		log.Println("Worker: SQS_QUEUE_URL is not set; investigations can only be started over HTTP.")
 		return
 	}
+	if !cfg.BoundaryConfigured() {
+		log.Println("Worker: SQS_QUEUE_URL is set but AGENT_TENANT_ID or AGENT_CLASSIFICATION is missing or invalid; not polling.")
+		return
+	}
 	if sreAgent == nil {
 		log.Println("Worker: SQS_QUEUE_URL is set but the agent is unavailable (no MCP); not polling.")
+		return
+	}
+	analysisURL := strings.TrimSpace(os.Getenv("ANALYSIS_DATABASE_URL"))
+	if analysisURL == "" {
+		log.Println("Worker: SQS_QUEUE_URL is set but ANALYSIS_DATABASE_URL is missing; not polling.")
+		return
+	}
+	if analysisURL == strings.TrimSpace(os.Getenv("DATABASE_URL")) {
+		log.Println("Worker: ANALYSIS_DATABASE_URL must be a separate read-only analysis database connection; not polling.")
+		return
+	}
+	var err error
+	analysisPool, err = pgxpool.New(context.Background(), analysisURL)
+	if err != nil {
+		log.Printf("Worker: could not build the analysis context pool for %s; not polling: %v", utils.RedactURL(analysisURL), err)
+		return
+	}
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelPing()
+	if err := analysisPool.Ping(pingCtx); err != nil {
+		analysisPool.Close()
+		analysisPool = nil
+		log.Printf("Worker: analysis context database %s is unavailable; not polling: %v", utils.RedactURL(analysisURL), err)
 		return
 	}
 
@@ -247,7 +275,7 @@ func initWorker() {
 
 	sqsWorker = &worker.Worker{
 		Queue:    client,
-		Resolver: incident.NewResolver(pool),
+		Resolver: incident.NewAnalysisResolver(analysisPool, cfg.Boundary()),
 		Agent:    sreAgent,
 		Results:  sqsResults,
 		Config:   cfg,
@@ -259,13 +287,25 @@ func initWorker() {
 		sqsWorker.Remediation = remediator
 	}
 
-	log.Printf("Worker: assignments from %s", client.Endpoint())
+	log.Printf("Worker: assignments from %s for region=%s tenant=%s classification=%s",
+		client.Endpoint(), cfg.Region, cfg.TenantID, cfg.Classification)
 }
 
 // the remediation pipeline: triage, candidate fixes, verification, draft PRs.
 // Every prerequisite is optional, so a laptop with no container runtime still
 // boots with the investigation half working.
 func initRemediation() {
+	// Read models remain available even when execution is explicitly disabled
+	// or a sandbox prerequisite is missing. This lets an operator distinguish
+	// "nothing ran" from "the API is unavailable" without granting write or
+	// container authority.
+	if s, err := remediation.NewSolutions(context.Background(), pool); err != nil {
+		log.Printf("Remediation: candidates will not be stored, so the UI cannot read them back: %v", err)
+	} else {
+		solutions = s
+		reclaimRemediations(s)
+	}
+
 	// unset means on: the prerequisites below already degrade, so this exists
 	// only to turn it off deliberately on a machine that could run it
 	if raw, set := os.LookupEnv("REMEDIATION_ENABLED"); set && !utils.EnvBool("REMEDIATION_ENABLED") {
@@ -289,15 +329,6 @@ func initRemediation() {
 		log.Println("Remediation: no container runtime, so no fixes will be proposed. " +
 			"Investigations are unaffected. Set CONTAINER_BINARY=podman if that is what you run.")
 		return
-	}
-
-	// candidates outlive the process when the tables are reachable. Like the
-	// worker's journal, losing durability is not worth refusing to run for.
-	if s, err := remediation.NewSolutions(context.Background(), pool); err != nil {
-		log.Printf("Remediation: candidates will not be stored, so the UI cannot read them back: %v", err)
-	} else {
-		solutions = s
-		reclaimRemediations(s)
 	}
 
 	publisher = remediation.NewPublisher(os.Getenv("GITHUB_TOKEN"))

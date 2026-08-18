@@ -8,6 +8,8 @@
 #   - ECR push rights            (AmazonEC2ContainerRegistryPowerUser)
 #   - App Runner rights          (AWSAppRunnerFullAccess)
 #   - an App Runner ECR access role (see APPRUNNER_ACCESS_ROLE_ARN below)
+#   - the queue consumer instance role created by static-log-analysis Terraform
+#     (set APPRUNNER_INSTANCE_ROLE_ARN to output agent_runtime_role_arn)
 #
 # Runtime configuration is read from the repository-root .env. That file holds
 # live secrets, so it is never baked into the image — the values are passed to
@@ -57,18 +59,28 @@ docker push "$IMAGE"
 
 # Turn .env into the JSON map App Runner wants, skipping comments and blanks.
 echo "==> Collecting runtime configuration from $ENV_FILE"
-RUNTIME_ENV="$(ENV_FILE="$ENV_FILE" python3 - <<'PY'
+RUNTIME_ENV="$(DEPLOY_AWS_REGION="$AWS_REGION" ENV_FILE="$ENV_FILE" python3 - <<'PY'
 import json, os
 
 wanted = {
     "DATABASE_URL",
+    "ANALYSIS_DATABASE_URL",
     "OPENROUTER_API_KEY",
     "OPENROUTER_MODEL",
     "OPENROUTER_EMBEDDING_MODEL",
     "OPENROUTER_EMBEDDING_DIMENSIONS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "EMBEDDING_BASE_URL",
+    "VECTOR_DIMENSIONS",
     "COCKROACH_API_KEY",
     "COCKROACH_CLUSTER_ID",
     "COCKROACH_MCP_URL",
+    "SQS_QUEUE_URL",
+    "AGENT_TENANT_ID",
+    "AGENT_CLASSIFICATION",
+    "API_TOKEN",
+    "CORS_ORIGINS",
 }
 
 env = {}
@@ -82,11 +94,26 @@ with open(os.environ["ENV_FILE"]) as f:
         if key in wanted and value:
             env[key] = value
 
-missing = {"DATABASE_URL", "OPENROUTER_API_KEY"} - env.keys()
+missing = {
+    "DATABASE_URL",
+    "ANALYSIS_DATABASE_URL",
+    "OPENROUTER_API_KEY",
+    "COCKROACH_API_KEY",
+    "SQS_QUEUE_URL",
+    "AGENT_TENANT_ID",
+    "AGENT_CLASSIFICATION",
+    "API_TOKEN",
+    "CORS_ORIGINS",
+} - env.keys()
 if missing:
     raise SystemExit(f"deploy: .env is missing {', '.join(sorted(missing))}")
-if "COCKROACH_API_KEY" not in env:
-    print("deploy: warning — COCKROACH_API_KEY unset, /agent and /tools will 503", flush=True)
+if env["DATABASE_URL"] == env["ANALYSIS_DATABASE_URL"]:
+    raise SystemExit("deploy: DATABASE_URL and ANALYSIS_DATABASE_URL must be separate connections")
+if env["CORS_ORIGINS"] == "*":
+    raise SystemExit("deploy: CORS_ORIGINS must name the approved dashboard origin, not *")
+
+env["AWS_REGION"] = os.environ["DEPLOY_AWS_REGION"]
+env["REMEDIATION_ENABLED"] = "false"
 
 print(json.dumps(env))
 PY
@@ -98,6 +125,35 @@ SERVICE_ARN="$(aws apprunner list-services --region "$AWS_REGION" \
 
 # App Runner needs a role it can assume to pull from a private ECR repository.
 ACCESS_ROLE_ARN="${APPRUNNER_ACCESS_ROLE_ARN:-arn:aws:iam::$ACCOUNT_ID:role/service-role/AppRunnerECRAccessRole}"
+# App Runner assumes this role inside the running container. Terraform scopes it
+# to consuming the one assignment queue and nothing else.
+INSTANCE_ROLE_ARN="${APPRUNNER_INSTANCE_ROLE_ARN:?set APPRUNNER_INSTANCE_ROLE_ARN from Terraform output agent_runtime_role_arn}"
+
+INSTANCE_CONFIG="$(python3 - "$INSTANCE_ROLE_ARN" <<'PY'
+import json, sys
+print(json.dumps({"Cpu": "1024", "Memory": "2048", "InstanceRoleArn": sys.argv[1]}))
+PY
+)"
+
+# The journal and SQS delivery semantics are safe for retries, but this release
+# intentionally runs one queue consumer until cross-instance coordination is a
+# demonstrated contract.
+AUTOSCALING_NAME="${APPRUNNER_AUTOSCALING_NAME:-$SERVICE_NAME-singleton}"
+AUTOSCALING_ARN="$(aws apprunner list-auto-scaling-configurations \
+  --auto-scaling-configuration-name "$AUTOSCALING_NAME" \
+  --region "$AWS_REGION" \
+  --query 'sort_by(AutoScalingConfigurationSummaryList[?Status==`ACTIVE`], &AutoScalingConfigurationRevision)[-1].AutoScalingConfigurationArn' \
+  --output text 2>/dev/null || echo "None")"
+if [ "$AUTOSCALING_ARN" = "None" ] || [ -z "$AUTOSCALING_ARN" ]; then
+  echo "==> Creating singleton App Runner auto-scaling configuration"
+  AUTOSCALING_ARN="$(aws apprunner create-auto-scaling-configuration \
+    --auto-scaling-configuration-name "$AUTOSCALING_NAME" \
+    --min-size 1 \
+    --max-size 1 \
+    --max-concurrency 100 \
+    --region "$AWS_REGION" \
+    --query 'AutoScalingConfiguration.AutoScalingConfigurationArn' --output text)"
+fi
 
 SOURCE_CONFIG="$(python3 - "$IMAGE" "$ACCESS_ROLE_ARN" "$RUNTIME_ENV" <<'PY'
 import json, sys
@@ -125,15 +181,17 @@ if [ "$SERVICE_ARN" = "None" ] || [ -z "$SERVICE_ARN" ]; then
     --region "$AWS_REGION" \
     --source-configuration "$SOURCE_CONFIG" \
     --health-check-configuration 'Protocol=HTTP,Path=/ping,Interval=10,Timeout=5,HealthyThreshold=1,UnhealthyThreshold=5' \
-    --instance-configuration 'Cpu=1024,Memory=2048' \
+    --instance-configuration "$INSTANCE_CONFIG" \
+    --auto-scaling-configuration-arn "$AUTOSCALING_ARN" \
     --query 'Service.ServiceArn' --output text)"
 else
   echo "==> Updating App Runner service $SERVICE_NAME"
   aws apprunner update-service \
     --service-arn "$SERVICE_ARN" \
     --region "$AWS_REGION" \
-    --source-configuration "$SOURCE_CONFIG" >/dev/null
-  aws apprunner start-deployment --service-arn "$SERVICE_ARN" --region "$AWS_REGION" >/dev/null
+    --source-configuration "$SOURCE_CONFIG" \
+    --instance-configuration "$INSTANCE_CONFIG" \
+    --auto-scaling-configuration-arn "$AUTOSCALING_ARN" >/dev/null
 fi
 
 echo "==> Waiting for the service to become RUNNING"

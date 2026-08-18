@@ -25,6 +25,10 @@ const (
 type Config struct {
 	QueueURL string
 	Region   string
+	TenantID string
+	// Classification is the exact classification this worker is configured to
+	// consume; assignments cannot choose it for themselves.
+	Classification string
 	// non-empty points the SQS client somewhere other than AWS, i.e. LocalStack
 	Endpoint string
 
@@ -42,6 +46,8 @@ func ConfigFromEnv() Config {
 	return Config{
 		QueueURL:          utils.EnvOr("SQS_QUEUE_URL", ""),
 		Region:            utils.EnvOr("AWS_REGION", DefaultRegion),
+		TenantID:          utils.EnvOr("AGENT_TENANT_ID", ""),
+		Classification:    utils.EnvOr("AGENT_CLASSIFICATION", ""),
 		Endpoint:          utils.EnvOr("AWS_ENDPOINT_URL", ""),
 		VisibilityTimeout: envDuration("WORKER_VISIBILITY_TIMEOUT", DefaultVisibilityTimeout),
 		WaitTime:          envDuration("WORKER_WAIT_TIME", DefaultWaitTime),
@@ -52,6 +58,16 @@ func ConfigFromEnv() Config {
 
 // whether there is a queue to poll at all
 func (c Config) Configured() bool { return c.QueueURL != "" }
+
+// BoundaryConfigured distinguishes "there is a queue" from "this process can
+// safely decide which assignments belong to it".
+func (c Config) BoundaryConfigured() bool {
+	return c.Region != "" && c.TenantID != "" && validClassification(c.Classification)
+}
+
+func (c Config) Boundary() Boundary {
+	return Boundary{Region: c.Region, TenantID: c.TenantID, Classification: c.Classification}
+}
 
 // clamp what SQS constrains and settle the pair that can contradict, so a bad
 // .env is corrected at boot rather than rejected on every receive

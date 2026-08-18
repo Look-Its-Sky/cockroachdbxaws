@@ -10,31 +10,6 @@ data "aws_subnets" "default" {
     values = [data.aws_vpc.default.id]
   }
 }
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-kernel-6.1-x86_64"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-
-  filter {
-    name   = "root-device-type"
-    values = ["ebs"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
 check "regional_boundary" {
   assert {
     condition     = data.aws_region.current.region == var.region
@@ -80,6 +55,58 @@ locals {
     "${local.cloudwatch_sources[key].log_group_name}=${local.cloudwatch_sources[key].service}=${local.cloudwatch_sources[key].environment}"
   ])
   dashboard_ingress_ports = var.dashboard_enabled ? toset([80, 443]) : toset([])
+  image_repositories = toset([
+    "analysis",
+    "dashboard",
+    "dashboard-admin",
+  ])
+}
+
+resource "aws_ecr_repository" "release" {
+  for_each             = local.image_repositories
+  name                 = "${var.name}/${each.value}"
+  image_tag_mutability = "IMMUTABLE"
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = merge(local.tags, { ImageRole = each.value })
+}
+
+resource "aws_ecr_lifecycle_policy" "release" {
+  for_each   = aws_ecr_repository.release
+  repository = each.value.name
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Retain the twenty most recent immutable releases for rollback"
+        selection = {
+          tagStatus      = "tagged"
+          tagPatternList = ["*"]
+          countType      = "imageCountMoreThan"
+          countNumber    = 20
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Remove abandoned untagged uploads after seven days"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 7
+        }
+        action = { type = "expire" }
+      },
+    ]
+  })
 }
 
 resource "aws_cloudwatch_log_group" "demo_payment" {
@@ -165,12 +192,70 @@ data "aws_iam_policy_document" "service" {
     actions   = ["sqs:GetQueueAttributes"]
     resources = [aws_sqs_queue.assignments.arn, aws_sqs_queue.dead_letter.arn]
   }
+
+  statement {
+    sid       = "AuthenticateToReleaseRegistry"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "PullReleaseImages"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+    ]
+    resources = [for repository in aws_ecr_repository.release : repository.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "service" {
   name   = "run-static-log-analysis"
   role   = aws_iam_role.service.id
   policy = data.aws_iam_policy_document.service.json
+}
+
+# The agent is deployed separately from the analysis host. Its App Runner task
+# can consume committed assignments, but cannot publish, inspect the DLQ, or
+# access CloudWatch. Database access is configured independently at runtime.
+data "aws_iam_policy_document" "agent_runtime_trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["tasks.apprunner.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "agent_runtime" {
+  name               = "${var.name}-agent-runtime"
+  assume_role_policy = data.aws_iam_policy_document.agent_runtime_trust.json
+  tags               = merge(local.tags, { DeploymentRole = "agent-runtime" })
+}
+
+data "aws_iam_policy_document" "agent_runtime" {
+  statement {
+    sid    = "ConsumeInvestigationAssignments"
+    effect = "Allow"
+    actions = [
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:ChangeMessageVisibility",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [aws_sqs_queue.assignments.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_runtime" {
+  name   = "consume-static-analysis-assignments"
+  role   = aws_iam_role.agent_runtime.id
+  policy = data.aws_iam_policy_document.agent_runtime.json
 }
 
 resource "aws_security_group" "service" {
@@ -200,7 +285,7 @@ resource "aws_security_group" "service" {
 }
 
 resource "aws_instance" "service" {
-  ami                         = data.aws_ami.al2023.id
+  ami                         = var.machine_image_id
   instance_type               = var.instance_type
   subnet_id                   = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address = true
@@ -208,22 +293,24 @@ resource "aws_instance" "service" {
   vpc_security_group_ids      = [aws_security_group.service.id]
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
-    compose_base64         = base64gzip(file("${path.module}/../../deploy/aws/compose.yaml"))
-    caddy_base64           = base64gzip(file("${path.module}/../../deploy/aws/Caddyfile"))
-    region                 = var.region
-    tenant_id              = var.tenant_id
-    classification         = var.classification
-    source_account         = data.aws_caller_identity.current.account_id
-    credential_identity    = aws_iam_role.service.arn
-    cloudwatch_groups      = local.cloudwatch_groups
-    queue_url              = aws_sqs_queue.assignments.url
-    dead_letter_queue_url  = aws_sqs_queue.dead_letter.url
-    repository_url         = var.repository_url
-    repository_ref         = var.repository_ref
-    journal_max_bytes      = format("%.0f", var.journal_max_bytes)
-    journal_min_free_bytes = format("%.0f", var.journal_min_free_bytes)
-    dashboard_enabled      = var.dashboard_enabled
-    dashboard_hostname     = var.dashboard_hostname
+    compose_base64                   = base64gzip(file("${path.module}/../../deploy/aws/compose.yaml"))
+    caddy_base64                     = base64gzip(file("${path.module}/../../deploy/aws/Caddyfile"))
+    deploy_images_base64             = base64gzip(file("${path.module}/../../deploy/aws/deploy-images.sh"))
+    region                           = var.region
+    tenant_id                        = var.tenant_id
+    classification                   = var.classification
+    source_account                   = data.aws_caller_identity.current.account_id
+    credential_identity              = aws_iam_role.service.arn
+    cloudwatch_groups                = local.cloudwatch_groups
+    queue_url                        = aws_sqs_queue.assignments.url
+    dead_letter_queue_url            = aws_sqs_queue.dead_letter.url
+    analysis_image_repository        = aws_ecr_repository.release["analysis"].repository_url
+    dashboard_image_repository       = aws_ecr_repository.release["dashboard"].repository_url
+    dashboard_admin_image_repository = aws_ecr_repository.release["dashboard-admin"].repository_url
+    journal_max_bytes                = format("%.0f", var.journal_max_bytes)
+    journal_min_free_bytes           = format("%.0f", var.journal_min_free_bytes)
+    dashboard_enabled                = var.dashboard_enabled
+    dashboard_hostname               = var.dashboard_hostname
   })
   # This host owns the durable journal, checkpoints, and dashboard-auth volume.
   # Bootstrap changes are applied in place through the documented SSM refresh;
@@ -321,7 +408,7 @@ resource "aws_security_group" "demo" {
 
 resource "aws_instance" "demo" {
   count                       = var.deploy_demo ? 1 : 0
-  ami                         = data.aws_ami.al2023.id
+  ami                         = var.machine_image_id
   instance_type               = var.demo_instance_type
   subnet_id                   = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address = true

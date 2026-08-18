@@ -1,8 +1,9 @@
 region    = "us-east-2"
 tenant_id = "hackathon-production"
 
-# Pin this to the commit you want the EC2 instance to build.
-repository_ref = "Static-Log-Analysis"
+# Pin an Amazon Linux 2023 x86_64 AMI from the configured region. Updating it
+# deliberately replaces both EC2 hosts; never roll it during an app release.
+machine_image_id = "ami-0123456789abcdef0"
 
 # The example creates a separate OpenTelemetry Demo host. Replace this
 # documentation-only address with the public /32 that may open the demo UI.

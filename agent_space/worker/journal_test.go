@@ -77,6 +77,29 @@ func TestDurableStoreMirrorsVerdicts(t *testing.T) {
 	}
 }
 
+func TestDurableStoreKeepsBoundedProgressThroughFinish(t *testing.T) {
+	j := newFakeJournal()
+	s := NewDurableStore(j)
+	a := queue.Assignment{InvestigationID: "v1", IncidentID: "i1", ServiceID: "payment"}
+	s.Start(a)
+
+	for i := 0; i < agent.MaxProgressEvents+5; i++ {
+		s.Progress(a, agent.Progress{Stage: agent.ProgressModel, Status: agent.ProgressStarted, Iteration: i + 1})
+	}
+	s.Finish(a, agent.Result{Answer: "ROLLBACK 7e91d04", Iterations: 3}, nil)
+
+	rec, ok, err := j.Load(context.Background(), "v1")
+	if err != nil || !ok {
+		t.Fatalf("record was not persisted (ok=%v, err=%v)", ok, err)
+	}
+	if len(rec.Result.Progress) != agent.MaxProgressEvents {
+		t.Fatalf("progress has %d events, want bound %d", len(rec.Result.Progress), agent.MaxProgressEvents)
+	}
+	if rec.Result.Progress[0].Iteration != 6 {
+		t.Errorf("oldest retained iteration = %d, want 6 after bounded eviction", rec.Result.Progress[0].Iteration)
+	}
+}
+
 func TestDurableStoreReadsThroughAfterRestart(t *testing.T) {
 	j := newFakeJournal()
 
