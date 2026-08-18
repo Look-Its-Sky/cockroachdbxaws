@@ -189,3 +189,9 @@ The next operator action is to restore a reliable management channel, collect
 the CloudWatch container's startup log and categorical exit/OOM state, and fix
 that cause before retrying systemd. Do not delete or recreate the journal,
 checkpoint volume, dashboard-auth volume, queues, instance, or either database.
+
+The first idempotent-bootstrap edit exceeded EC2's 16 KiB user-data limit; a
+read-only Terraform plan caught it before apply. The implementation was reduced
+without changing its behavior and passed Terraform validation. The final live
+plan contains zero creates, one in-place bootstrap-metadata change, and zero
+destroys or replacements. It is intentionally unapplied while SSM is unhealthy.

@@ -132,9 +132,9 @@ func TestAWSBootstrapRefreshSkipsSatisfiedHostTooling(t *testing.T) {
 		`command -v aws`,
 		`command -v openssl`,
 		`command -v curl`,
-		`if [ "$${#missing_packages[@]}" -gt 0 ]`,
-		`if ! printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check`,
-		`install -o root -g root -m 0755 "$temporary_compose" "$compose_plugin"`,
+		`dnf install -y docker awscli-2 openssl curl`,
+		`printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check >/dev/null 2>&1 || {`,
+		`chmod 0755 "$compose_plugin"`,
 	} {
 		if !strings.Contains(bootstrap, required) {
 			t.Errorf("in-place bootstrap refresh does not contain %q", required)

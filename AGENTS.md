@@ -134,6 +134,9 @@ held, and the host's SSM channel stopped producing fresh heartbeats before the
 container startup cause could be collected. The failed candidate remains the
 root-only release selection because no older digest release exists. See the
 immutable-image follow-up in `docs/deployment/aws-release-attempt-2026-08-17.md`.
+The idempotent bootstrap follow-up is committed but intentionally unapplied;
+its final live plan is one in-place metadata change with no create, destroy, or
+replacement action, and applying it waits on management-channel recovery.
 
 Local integration is available through `compose.local-integration.yaml`. It
 joins the static-analysis Compose network, creates a separate agent database
