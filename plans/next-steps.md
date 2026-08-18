@@ -245,16 +245,30 @@ container #1 (read-only)      host                    container #2
 Two clones before any candidate runs. Deliberate — the triage gate exists to stop
 the expensive path, so the second clone is only paid for once the gate has passed.
 
-### One known hole in this
+### The one known hole in this, now closed
 
-`validateEdits` (`remediation/patch.go:511`) has **no guard against a truncated
-file**. The model returns whole files; if one comes back with a lazy
-`// ... rest unchanged`, that file is written as-is and the rest of the code is
-silently deleted. The build would usually catch it, but "usually" is doing a lot
-of work there, and a service with no test command would not catch it at all.
+A lazy `// ... rest unchanged` used to be written as-is, silently deleting the
+rest of the file. The build would usually catch it, but not a prefix that is
+still syntactically valid — a dropped trailing function compiles — and a
+service with no test command would not catch it at all.
 
-Not fixed. A length-ratio check against the original, or a scan for
-`rest unchanged`-style markers, would close it. Roughly twenty lines.
+`checkWholeFiles` (`remediation/patch.go`, called from `Propose` and `Repair`
+after `ParseProposal`) now refuses an edit that cannot possibly be the
+complete file:
+
+- the file shrank below half the original (growth is never checked — added
+  code cannot delete code);
+- a comment carries an ellipsis *and* a stand-in phrase (`rest unchanged`,
+  `omitted for brevity`, …) — all three of a comment prefix, an ellipsis and a
+  phrase, so a log string like `"loading the rest of the file..."` passes;
+- the file is marked too large and was never shown to the model; or
+- the path is in the tree, so it exists in the checkout, but was never among
+  the files the model was shown. A genuinely new file and a recreated missing
+  file pass.
+
+A refusal fails the candidate *before a container is spent*, and the reason
+the model's answer got rejected is what the engineer reads on the candidate.
+With no sources and no tree the check is a no-op, so nothing degrades.
 
 ---
 
@@ -294,19 +308,18 @@ get wrong.
 Neither is code. The server is in debug mode, logging every route and request.
 The spend cap is the only control that still works when the code is wrong.
 
+### The three frontend gaps — done 2026-08-18
+
+All three "worth doing if there is time" items from the frontend-facing surface
+landed together, since none was more than an hour: `GET /capabilities`
+(`routes/remediation.go`), `verification.summary` on the wire (a `MarshalJSON`
+on `Verification` in `remediation/candidate.go` — computed, never stored), and
+`?dry_run=1` on `POST /agent/:id/decision`. Documented in
+`agent_space/docs/frontend-api.md`; tests in `routes/routes_test.go` and
+`remediation/candidate_test.go`. Nothing else is known to block the frontend.
+
 ### Worth doing if there is time
 
-- **A truncation guard in `validateEdits`.** See above. The highest-value of
-  these — it is a silent data-loss path.
-- **A capability endpoint.** The UI currently learns that PR opening is
-  unconfigured by trying it and getting a `503`. One `GET /capabilities` would
-  let it disable the button up front.
-- **`verification.summary` on the wire.** The seven summary strings are computed
-  server-side for the decision document but not sent with a candidate, so the
-  frontend re-derives them from booleans — two implementations that can drift on
-  the one thing that must not be got wrong.
-- **`?dry_run=1` on the decision endpoint**, returning the document that *would*
-  be embedded without writing anything.
 - **Re-embedding decisions after an embedding-model change.** The `document`
   column makes it a loop over rows. Write it when it is needed.
 - **Concurrency is still unverified.** Two simultaneous `/agent` calls have never
@@ -565,19 +578,21 @@ two on identical code). Do not quote 66s as reliable without
 
 ## Repo state
 
-Branch `agent_space`, **pushed and in sync** with
-`origin/agent_space`. Working tree clean at `b03fcc9`.
+Branch `agent_space`. Working tree clean; the top of the list is the newest
+*pushed* commit, and above it sits the unpushed commit that closed the
+truncation hole above and updated this section.
 
 ```
+d34d23b  should be somewhat working now
+9f88950  Point the handoff doc at the demo work, now the API is done
+4f52c44  Let a list row say "3 fixes, dealt with" without fetching every diff
+0c9ef89  Fold NEXT.md into next-steps.md so there is one handoff doc
+453f788  Bring the handoff doc back in line with what is actually built
 b03fcc9  Write down the API the frontend is being built against
 7fd0778  Return the recorded decision with the remediation that produced it
 35453f2  Tell the repair prompt what format to answer in
 6014967  Stop reasoning tokens silently eating the whole completion budget
 94ae047  Learn from which fix an engineer picked, and which they turned down
-70c8145  Stop discarding investigations whose process died mid-run
-cd0a429  Write down the next two pieces of work and the decisions behind them
-b62fbd6  Ignore a stale endpoint override when the queue URL is AWS's own
-833ea68  Turn a HOTFIX verdict into verified candidate fixes and a draft PR
 ```
 
 Six commits before `7fd0778` carry a `Co-Authored-By` trailer that should not be

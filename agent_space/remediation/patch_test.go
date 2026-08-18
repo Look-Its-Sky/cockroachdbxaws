@@ -1,6 +1,7 @@
 package remediation
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -342,5 +343,197 @@ func TestMarkdownFormattedAnswerYieldsNoEdits(t *testing.T) {
 	// and the empty summary is what made this indistinguishable from silence
 	if p.Summary != "" {
 		t.Errorf("Summary = %q", p.Summary)
+	}
+}
+
+// a whole-file rewrite that comes back smaller than it was is a truncation
+// until proven otherwise; the original is the only reference that can see it
+var originalFile = strings.Repeat("func line(n int) int { return n + 1 }\n", 100)
+
+func TestCheckWholeFilesRejectsAFileThatShrank(t *testing.T) {
+	truncated := strings.Repeat("func line(n int) int { return n + 1 }\n", 10)
+
+	err := checkWholeFiles(
+		[]FileEdit{{Path: "a.go", Contents: truncated}},
+		[]Sourced{{Path: "a.go", Contents: originalFile}},
+		"a.go",
+	)
+	if err == nil {
+		t.Fatal("a file that shrank to 10% of its original size was accepted")
+	}
+	for _, want := range []string{"a.go", "shrank", "truncation"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+func TestCheckWholeFilesAcceptsFilesOfSimilarSize(t *testing.T) {
+	for name, contents := range map[string]string{
+		// a real fix deletes little; growth is never a data-loss path
+		"shrunk a little": originalFile[:len(originalFile)*6/10],
+		"grew a little":   originalFile + strings.Repeat("func added() {}\n", 20),
+	} {
+		err := checkWholeFiles(
+			[]FileEdit{{Path: "a.go", Contents: contents}},
+			[]Sourced{{Path: "a.go", Contents: originalFile}},
+			"a.go",
+		)
+		if err != nil {
+			t.Errorf("%s was rejected: %v", name, err)
+		}
+	}
+}
+
+func TestCheckWholeFilesRejectsStandInComments(t *testing.T) {
+	for _, standin := range []string{
+		"// ... rest unchanged",
+		"# The rest of the file is omitted for brevity...",
+		"/* remaining code, elided for brevity ... */",
+		"<!-- ... rest of the code ... -->",
+		"-- ... unchanged below --",
+		"* the rest of the function is the same ...",
+	} {
+		// the model copied the whole file and then stopped, so the size is right
+		// and only the stand-in itself reveals the truncation
+		contents := originalFile + "\n" + standin + "\n"
+
+		err := checkWholeFiles(
+			[]FileEdit{{Path: "a.go", Contents: contents}},
+			[]Sourced{{Path: "a.go", Contents: originalFile}},
+			"a.go",
+		)
+		if err == nil {
+			t.Errorf("the stand-in %q was accepted", standin)
+			continue
+		}
+		if !strings.Contains(err.Error(), standin) {
+			t.Errorf("error does not quote the offending line:\n%v", err)
+		}
+	}
+}
+
+// the guard must not reject a fix that merely talks like a truncation: a log
+// message can carry the phrase, a comment can carry an ellipsis, and neither
+// is a stand-in for code that is about to be deleted
+func TestCheckWholeFilesIgnoresPlausibleCode(t *testing.T) {
+	for name, added := range map[string]string{
+		"a log message quoting the phrase": `log.Printf("loading the rest of the file...")`,
+		"a comment without an ellipsis":    "// cache the rest of the rows",
+		"an ellipsis without the phrase":   "// and so on...",
+		"a bare ellipsis line":             "...",
+	} {
+		contents := originalFile + "\n" + added + "\n"
+
+		err := checkWholeFiles(
+			[]FileEdit{{Path: "a.go", Contents: contents}},
+			[]Sourced{{Path: "a.go", Contents: originalFile}},
+			"a.go",
+		)
+		if err != nil {
+			t.Errorf("%s was rejected: %v", name, err)
+		}
+	}
+}
+
+func TestCheckWholeFilesAllowsANewFile(t *testing.T) {
+	err := checkWholeFiles(
+		[]FileEdit{{Path: "new/thing.go", Contents: "package thing\n"}},
+		[]Sourced{{Path: "a.go", Contents: originalFile}},
+		"a.go",
+	)
+	if err != nil {
+		t.Fatalf("a genuinely new file was rejected: %v", err)
+	}
+}
+
+func TestCheckWholeFilesRejectsAnUnseenExistingFile(t *testing.T) {
+	err := checkWholeFiles(
+		[]FileEdit{{Path: "b.go", Contents: "package b\n"}},
+		[]Sourced{{Path: "a.go", Contents: originalFile}},
+		"a.go\nb.go\nc.go\n",
+	)
+	if err == nil {
+		t.Fatal("a file that exists in the checkout but was never shown was accepted for rewrite")
+	}
+	for _, want := range []string{"b.go", "not shown"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+func TestCheckWholeFilesRejectsAnOversizedFile(t *testing.T) {
+	err := checkWholeFiles(
+		[]FileEdit{{Path: "big.json", Contents: "{}"}},
+		[]Sourced{{Path: "big.json", TooLarge: true}},
+		"big.json",
+	)
+	if err == nil {
+		t.Fatal("a rewrite of a file the model was never shown was accepted")
+	}
+	if !strings.Contains(err.Error(), "big.json") {
+		t.Errorf("error does not name the file: %v", err)
+	}
+}
+
+// a missing file being recreated is a new file, and the prompt already told
+// the model the path no longer exists — creating it is a legitimate answer
+func TestCheckWholeFilesAllowsRecreatingAGoneFile(t *testing.T) {
+	err := checkWholeFiles(
+		[]FileEdit{{Path: "gone.go", Contents: "package gone\n"}},
+		[]Sourced{{Path: "gone.go", Missing: true}},
+		"gone.go",
+	)
+	if err != nil {
+		t.Fatalf("recreating a missing file was rejected: %v", err)
+	}
+}
+
+func TestCheckWholeFilesIsANoopWithoutSources(t *testing.T) {
+	if err := checkWholeFiles([]FileEdit{{Path: "a.go", Contents: "x"}}, nil, ""); err != nil {
+		t.Fatalf("with no sources and no tree the check must not fire: %v", err)
+	}
+}
+
+// the guard sits where the model's answer is read, so a truncated block never
+// reaches a container; the reason is what the engineer will see on the candidate
+func TestProposeRejectsATruncatedFile(t *testing.T) {
+	answer := "SUMMARY: fix it\nRATIONALE: because\n\n" +
+		fileBegin + "a.go\n" +
+		strings.Repeat("func line(n int) int { return n + 1 }\n", 5) +
+		"// ... rest unchanged\n" +
+		fileEnd + "\n"
+
+	p, err := Propose(context.Background(),
+		&sequencedModel{answers: []string{answer}},
+		ProposalInput{Sources: []Sourced{{Path: "a.go", Contents: originalFile}}},
+		DefaultStrategies[0])
+
+	if err == nil {
+		t.Fatalf("a truncated proposal was accepted: %+v", p)
+	}
+	for _, want := range []string{"a.go", "truncation"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+func TestProposeAcceptsACompleteFile(t *testing.T) {
+	answer := "SUMMARY: fix it\nRATIONALE: because\n\n" +
+		fileBegin + "a.go\n" + originalFile +
+		fileEnd + "\n"
+
+	p, err := Propose(context.Background(),
+		&sequencedModel{answers: []string{answer}},
+		ProposalInput{Sources: []Sourced{{Path: "a.go", Contents: originalFile}}},
+		DefaultStrategies[0])
+
+	if err != nil {
+		t.Fatalf("a complete proposal was rejected: %v", err)
+	}
+	if len(p.Edits) != 1 || p.Edits[0].Path != "a.go" {
+		t.Fatalf("edits = %+v", p.Edits)
 	}
 }
