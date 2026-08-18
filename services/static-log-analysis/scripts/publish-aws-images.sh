@@ -13,6 +13,17 @@ dashboard_admin_repository=$4
 commit_sha=$5
 service_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repository_root=$(CDPATH= cd -- "$service_root/../.." && pwd)
+docker_config=$(mktemp -d)
+trap 'rm -rf -- "$docker_config"' EXIT
+export DOCKER_CONFIG=$docker_config
+install -d -m 0700 "$DOCKER_CONFIG/cli-plugins"
+curl -fsSL \
+  https://github.com/docker/buildx/releases/download/v0.34.1/buildx-v0.34.1.linux-amd64 \
+  -o "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+echo "f1332ddb9010bd0b72628266c3a906d9a6979848033df4c8d9bd2cd113bae12b  $DOCKER_CONFIG/cli-plugins/docker-buildx" |
+  sha256sum --check >/dev/null
+chmod 0700 "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+docker buildx version >/dev/null
 
 if ! [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "COMMIT_SHA must be a full lowercase Git commit SHA" >&2

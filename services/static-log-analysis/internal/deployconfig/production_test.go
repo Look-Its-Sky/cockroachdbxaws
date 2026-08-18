@@ -235,6 +235,9 @@ func TestAWSImagePublisherBuildsEveryArtifactFromOneCleanCommit(t *testing.T) {
 	for _, required := range []string{
 		`git -C "$repository_root" rev-parse HEAD`,
 		`git -C "$repository_root" status --porcelain`,
+		`export DOCKER_CONFIG=$docker_config`,
+		`buildx-v0.34.1.linux-amd64`,
+		`sha256sum --check`,
 		`--platform linux/amd64`,
 		`--target runtime`,
 		`--target admin`,

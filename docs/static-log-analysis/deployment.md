@@ -190,8 +190,10 @@ dashboard_admin_repository=$(printf '%s' "$repositories" | jq -r '."dashboard-ad
 The publisher refuses a dirty checkout or a SHA other than `HEAD`. It builds
 all three Linux/amd64 artifacts off-host, pushes the same immutable commit tag
 to each repository, resolves the registry digests, and prints the three digest
-references needed for cutover. Record those values in the private release
-runbook; do not add an account-specific repository URL to this public repo.
+references needed for cutover. Its checksum-pinned Buildx plugin and ECR login
+live in a disposable Docker configuration that is removed on exit. Record the
+values in the private release runbook; do not add an account-specific
+repository URL to this public repo.
 
 For an existing instance created before digest-based releases, apply Terraform
 first and refresh the in-place bootstrap through Session Manager. Retrieve the
