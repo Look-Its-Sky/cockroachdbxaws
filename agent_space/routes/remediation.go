@@ -21,6 +21,10 @@ const remediationUnavailable = "Remediation is not running. It needs a container
 
 const solutionsUnavailable = "Proposed fixes are not being stored. Check the database connection"
 
+// shared with Capabilities, so a client that checks /capabilities first sees
+// the exact sentence RecordDecision would have put in "warning"
+const noIndexConfigured = "recorded, but there is no decision index configured, so it will not be recalled"
+
 // how long a read for the UI may take. These are single queries; the long work
 // happened somewhere else and is already written down.
 const readTimeout = 15 * time.Second
@@ -58,6 +62,28 @@ func Repositories(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"count": len(out), "repositories": out})
+}
+
+// what the frontend can do right now, so it can grey out a button up front
+// instead of offering it and rendering a 503 the engineer cannot act on. Every
+// reason string here is the same one the corresponding route would give, so a
+// client that calls the route anyway sees a message it has already read.
+func Capabilities(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"repositories":    capability(Repos != nil, remediationUnavailable),
+		"remediation":     capability(Remediation != nil, remediationUnavailable),
+		"solutions":       capability(Solutions != nil, solutionsUnavailable),
+		"queue_worker":    capability(Results != nil, workerUnavailable),
+		"pr_opening":      capability(Publisher.Configured(), remediation.ErrNoToken.Error()),
+		"precedent_index": capability(PrecedentIndex != nil, noIndexConfigured),
+	})
+}
+
+func capability(available bool, reason string) gin.H {
+	if available {
+		return gin.H{"available": true}
+	}
+	return gin.H{"available": false, "reason": reason}
 }
 
 // recent remediation runs, newest first. Candidates are
@@ -330,6 +356,23 @@ func RecordDecision(c *gin.Context) {
 		return
 	}
 
+	// a preview: everything NewDecision validated stands, but nothing is
+	// written, indexed, or logged as a real decision. decision.ID and
+	// decided_at are dropped rather than echoed, since neither one refers to
+	// anything that actually exists yet.
+	if isTruthy(c.Query("dry_run")) {
+		c.JSON(http.StatusOK, gin.H{
+			"dry_run":               true,
+			"investigation_id":      decision.InvestigationID,
+			"chosen_candidate_id":   decision.ChosenCandidateID,
+			"rejected":              len(decision.Rejections),
+			"reasons_from_engineer": decision.EngineerWroteReasons(),
+			"reasons_auto":          len(decision.Rejections) - decision.EngineerWroteReasons(),
+			"document":              decision.Document,
+		})
+		return
+	}
+
 	superseded, err := Solutions.SaveDecision(ctx, decision)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -372,7 +415,7 @@ func RecordDecision(c *gin.Context) {
 // a client navigating away cannot leave one stored but unrecallable
 func indexDecision(d remediation.Decision, superseded []string) (indexed bool, warning string) {
 	if PrecedentIndex == nil {
-		return false, "recorded, but there is no decision index configured, so it will not be recalled"
+		return false, noIndexConfigured
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), indexTimeout)
@@ -439,6 +482,12 @@ func incidentProseFor(c *gin.Context, o remediation.Outcome) string {
 		InvestigationID: o.InvestigationID,
 		ServiceID:       o.ServiceID,
 	}, inc)
+}
+
+// "1" and "true" only, so "?dry_run=0" and a typo both behave as absent
+// rather than silently writing a decision the caller meant to preview
+func isTruthy(v string) bool {
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 func fallback(values ...string) string {

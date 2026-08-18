@@ -66,6 +66,7 @@ func main() {
 	guarded.GET("/agent/:id", routes.Investigation)
 
 	// the remediation half, which is what the frontend is built on
+	guarded.GET("/capabilities", routes.Capabilities)
 	guarded.GET("/repositories", routes.Repositories)
 	guarded.GET("/remediations", routes.Remediations)
 	guarded.GET("/agent/:id/remediation", routes.RemediationFor)

@@ -308,17 +308,18 @@ get wrong.
 Neither is code. The server is in debug mode, logging every route and request.
 The spend cap is the only control that still works when the code is wrong.
 
+### The three frontend gaps — done 2026-08-18
+
+All three "worth doing if there is time" items from the frontend-facing surface
+landed together, since none was more than an hour: `GET /capabilities`
+(`routes/remediation.go`), `verification.summary` on the wire (a `MarshalJSON`
+on `Verification` in `remediation/candidate.go` — computed, never stored), and
+`?dry_run=1` on `POST /agent/:id/decision`. Documented in
+`agent_space/docs/frontend-api.md`; tests in `routes/routes_test.go` and
+`remediation/candidate_test.go`. Nothing else is known to block the frontend.
+
 ### Worth doing if there is time
 
-- **A capability endpoint.** The UI currently learns that PR opening is
-  unconfigured by trying it and getting a `503`. One `GET /capabilities` would
-  let it disable the button up front.
-- **`verification.summary` on the wire.** The seven summary strings are computed
-  server-side for the decision document but not sent with a candidate, so the
-  frontend re-derives them from booleans — two implementations that can drift on
-  the one thing that must not be got wrong.
-- **`?dry_run=1` on the decision endpoint**, returning the document that *would*
-  be embedded without writing anything.
 - **Re-embedding decisions after an embedding-model change.** The `document`
   column makes it a loop over rows. Write it when it is needed.
 - **Concurrency is still unverified.** Two simultaneous `/agent` calls have never

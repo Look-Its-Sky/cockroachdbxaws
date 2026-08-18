@@ -1,6 +1,7 @@
 package remediation
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -94,6 +95,20 @@ func (v Verification) Summary() string {
 	default:
 		return "applied, but this service declares neither a build nor a test command, so nothing was verified"
 	}
+}
+
+// puts Summary() on the wire as "summary" alongside the fields it is derived
+// from, so the frontend renders the one sentence this system's discipline
+// depends on rather than re-deriving it from booleans in two places that can
+// drift. Computed at marshal time, never stored: encode() in store.go uses
+// this same method, so the persisted row grows a redundant but harmless
+// "summary" key that decode() ignores on the way back in.
+func (v Verification) MarshalJSON() ([]byte, error) {
+	type alias Verification
+	return json.Marshal(struct {
+		alias
+		Summary string `json:"summary"`
+	}{alias: alias(v), Summary: v.Summary()})
 }
 
 // where a candidate has got to

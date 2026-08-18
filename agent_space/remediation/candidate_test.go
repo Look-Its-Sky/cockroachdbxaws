@@ -1,9 +1,46 @@
 package remediation
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// the frontend was re-deriving this sentence client-side from the booleans;
+// it must come down on the wire as the same words Summary() would give
+func TestVerificationMarshalsSummaryOnTheWire(t *testing.T) {
+	v := Verification{Applied: true, BuildRan: true, Built: true}
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded struct {
+		Applied bool   `json:"applied"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.Summary != v.Summary() {
+		t.Errorf("wire summary = %q, want %q", decoded.Summary, v.Summary())
+	}
+	if !decoded.Applied {
+		t.Error("marshaling Summary alongside the other fields lost one of them")
+	}
+
+	// the field is derived, not stored: reading it back must not require a
+	// Summary field on the struct itself
+	var roundTripped Verification
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if roundTripped != v {
+		t.Errorf("round trip = %+v, want %+v", roundTripped, v)
+	}
+}
 
 // the one thing this must never do is let a service with no tests look verified
 func TestVerificationSummaryNeverClaimsTestsThatDidNotRun(t *testing.T) {

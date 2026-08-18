@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"agent_space/remediation"
 	"agent_space/utils"
 )
 
@@ -30,6 +32,7 @@ func router() *gin.Engine {
 	guarded.POST("/agent", Agent)
 	guarded.GET("/agent/:id", Investigation)
 
+	guarded.GET("/capabilities", Capabilities)
 	guarded.GET("/repositories", Repositories)
 	guarded.GET("/remediations", Remediations)
 	guarded.GET("/agent/:id/remediation", RemediationFor)
@@ -56,6 +59,7 @@ func TestRoutesRegisterWithoutConflicting(t *testing.T) {
 		"POST /agent/:id/remediation",
 		"POST /agent/:id/decision",
 		"POST /solutions/:candidate/pr",
+		"GET /capabilities",
 		"GET /repositories",
 		"GET /remediations",
 	} {
@@ -88,6 +92,70 @@ func TestRemediationRoutesReportWhatIsMissing(t *testing.T) {
 				t.Errorf("status = %d, want 503 with an explanation; body: %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// unlike the routes above, this one must never 503 — its entire point is to
+// tell the frontend what is missing before it tries a route that would
+func TestCapabilitiesReportsWhatIsMissing(t *testing.T) {
+	Remediation, Solutions, Repos, Publisher, Results, Incidents = nil, nil, nil, nil, nil, nil
+
+	r := router()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/capabilities", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]struct {
+		Available bool   `json:"available"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, key := range []string{
+		"repositories", "remediation", "solutions", "queue_worker", "pr_opening", "precedent_index",
+	} {
+		got, ok := body[key]
+		if !ok {
+			t.Errorf("%s missing from the response", key)
+			continue
+		}
+		if got.Available {
+			t.Errorf("%s reported available with nothing wired up", key)
+		}
+		if got.Reason == "" {
+			t.Errorf("%s reported unavailable with no reason an engineer could read", key)
+		}
+	}
+}
+
+// a capability the route actually gates (pr_opening, on Publisher.Configured)
+// must flip to true once its prerequisite is met, not just report false always
+func TestCapabilitiesReflectsWhatIsWired(t *testing.T) {
+	Remediation, Solutions, Repos, Results, Incidents = nil, nil, nil, nil, nil
+	Publisher = remediation.NewPublisher("a-token")
+	defer func() { Publisher = nil }()
+
+	r := router()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/capabilities", nil))
+
+	var body map[string]struct {
+		Available bool `json:"available"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !body["pr_opening"].Available {
+		t.Errorf("pr_opening reported unavailable with a token configured")
+	}
+	if body["solutions"].Available {
+		t.Errorf("solutions reported available with nothing wired up")
 	}
 }
 

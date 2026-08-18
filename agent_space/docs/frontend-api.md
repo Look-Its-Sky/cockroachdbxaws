@@ -53,6 +53,8 @@ entirely rather than sent as `null`.
 ## The flow
 
 ```
+  GET /capabilities                  once at load — what to grey out
+        │
   incident on SQS
         │
         ▼
@@ -71,6 +73,43 @@ entirely rather than sent as `null`.
 `:id` is an **investigation id** throughout. Candidates have their own ids and
 the two are not interchangeable — posting a candidate id where an investigation
 id belongs gets a `404`, not a wrong answer.
+
+---
+
+## `GET /capabilities`
+
+Worth calling once at load, before `/repositories`. Every gated route below
+still returns its own error if you call it anyway — this exists so the UI can
+grey out a button up front instead of offering it and rendering a `503` the
+engineer cannot act on.
+
+```json
+{
+  "repositories": { "available": true },
+  "remediation": { "available": true },
+  "solutions": { "available": true },
+  "queue_worker": { "available": true },
+  "pr_opening": { "available": false, "reason": "remediation: GITHUB_TOKEN is not set, so no pull request can be opened" },
+  "precedent_index": { "available": false, "reason": "recorded, but there is no decision index configured, so it will not be recalled" }
+}
+```
+
+Never `503`s itself — that would defeat the point. Six keys, each a prerequisite
+something below needs:
+
+| Key | Gates | `reason` when `false` is exactly the error you'd get from |
+|---|---|---|
+| `repositories` | `GET /repositories` | that route's `503` |
+| `remediation` | `POST /agent/:id/remediation` | that route's `503` |
+| `solutions` | everything under [The flow](#the-flow) except opening a PR | that route's `503` |
+| `queue_worker` | `GET /agent/:id`, and remediation ever starting at all | that route's `503` |
+| `pr_opening` | `POST /solutions/:candidate/pr` | that route's `503` |
+| `precedent_index` | nothing blocks — decisions still save with `indexed: false` | the same sentence `POST /agent/:id/decision` puts in `warning` |
+
+Every `reason` string is the literal message the gated route itself would
+return, so there is one sentence to show, not two that can drift apart. No
+auth-only fields here — whether `API_TOKEN` is set isn't something a client
+that reached this endpoint needs to be told.
 
 ---
 
@@ -243,7 +282,8 @@ an incident because a small model could not decide.
     "tested": true,
     "timed_out": false,
     "duration_ms": 41200,
-    "log": "..."
+    "log": "...",
+    "summary": "builds, and the service's tests pass"
   },
   "repairs": 1,
   "status": "proposed",
@@ -282,13 +322,15 @@ separate on purpose:
 | `build_ran` / `built` | was a build attempted / did it succeed |
 | `test_ran` / `tested` | were the service's tests attempted / did they pass |
 | `timed_out` | the sandbox hit its ceiling; whatever it reached by then still stands, nothing after it ran |
+| `summary` | the one sentence below, already chosen for you |
 
 `build_ran: false` and `built: false` do **not** mean the build failed. They mean
 no build was attempted, usually because the service declares no build command.
 Rendering "✗ build" for that is a false claim about the code.
 
-The server already has the sentence for this. Every candidate's verification maps
-to exactly one of:
+`summary` is computed server-side from the other fields, on every response —
+render it rather than deriving your own string from the booleans. It is exactly
+one of:
 
 - `the change could not be applied to a clean checkout`
 - `builds, and the service's tests pass`
@@ -304,10 +346,9 @@ discipline this system is built around is not collapsing the second into the
 first. A green tick that means both is the one UI decision that would undo it.
 Colour-code by all means — but the words are load-bearing.
 
-(They are currently only computed server-side for the decision document, so today
-you would derive them from the booleans. If you would rather they came down on
-the wire as `verification.summary`, say so and I will add the field — it is five
-minutes and it removes the chance of the two implementations drifting.)
+The decision document (`document`, below) uses the same sentence for the same
+reason: one implementation of "what does this verification mean," not two that
+can quietly disagree.
 
 ### `candidates` ordering
 
@@ -519,6 +560,30 @@ showing.
 | `422` | a candidate id that is not part of this investigation |
 | `503` | no database |
 
+### `?dry_run=1`
+
+Add it to the URL (`?dry_run=1` or `?dry_run=true`) and nothing is written,
+indexed, or logged — the body is validated exactly as above, and you get back
+the `document` that *would* have been embedded, to preview before the engineer
+commits:
+
+```json
+{
+  "dry_run": true,
+  "investigation_id": "7f7ffef8-...",
+  "chosen_candidate_id": "f3e2f376-...",
+  "rejected": 2,
+  "reasons_from_engineer": 1,
+  "reasons_auto": 1,
+  "document": "Remediation decision (2026-08-14) for incident ..."
+}
+```
+
+**`200`**, not `201` — nothing was created. No `decision_id`, no `indexed`, no
+`decided_at`: none of those refer to anything that exists. Same error statuses
+as a real post (`400` / `404` / `422` / `503`); a dry run is not exempt from
+"a candidate id that is not part of this investigation".
+
 ### Three rules that are not visible in the shapes
 
 **1. Re-deciding replaces. It does not merge.**
@@ -634,20 +699,16 @@ want a "what can this thing see" panel; not needed for the picker.
 
 ## Not there yet
 
-Say the word on any of these and they get built — none is large.
+Say the word on either of these and it gets built.
 
-- **A capability endpoint.** Right now the only way to learn that PR opening is
-  unconfigured is to try it and get a `503`. A single `GET /capabilities` would
-  let the UI disable the button up front instead of surfacing an error the
-  engineer cannot act on.
-- **`verification.summary` on the wire.** As above — currently derived
-  client-side from the booleans.
-- **`?dry_run=1` on the decision endpoint**, returning the `document` that
-  *would* be embedded without writing anything. Useful if you want a preview
-  before the engineer commits.
 - **Websockets / SSE.** Polling only. Given run times of minutes, polling is
   honestly fine.
 - **Pagination beyond `limit`.** No cursor, no offset.
+
+`GET /capabilities`, `verification.summary`, and `?dry_run=1` on the decision
+endpoint were on this list; all three are built now — see
+[`GET /capabilities`](#get-capabilities), [`verification` — please read this
+bit](#verification--please-read-this-bit), and [`?dry_run=1`](#dry_run1).
 
 ## If something here is wrong
 
