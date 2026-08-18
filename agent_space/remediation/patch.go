@@ -266,7 +266,14 @@ func Propose(ctx context.Context, model llms.Model, in ProposalInput, s Strategy
 	if err != nil {
 		return Proposal{}, err
 	}
-	return ParseProposal(content)
+	p, err := ParseProposal(content)
+	if err != nil {
+		return Proposal{}, err
+	}
+	if err := checkWholeFiles(p.Edits, in.Sources, in.Tree); err != nil {
+		return Proposal{}, err
+	}
+	return p, nil
 }
 
 // the model's text, or an error saying why there is none. An empty message with
@@ -419,7 +426,16 @@ func Repair(ctx context.Context, model llms.Model, in ProposalInput, previous Pr
 	if err != nil {
 		return Proposal{}, err
 	}
-	return ParseProposal(content)
+	p, err := ParseProposal(content)
+	if err != nil {
+		return Proposal{}, err
+	}
+	// against the files as the model left them last round, not the originals:
+	// each round is checked against the version that immediately preceded it
+	if err := checkWholeFiles(p.Edits, repairInput.Sources, in.Tree); err != nil {
+		return Proposal{}, err
+	}
+	return p, nil
 }
 
 // how much of a failure to quote back. A Go compiler error is three lines; a
@@ -531,6 +547,110 @@ func validateEdits(edits []FileEdit) error {
 		edits[i].Path = clean
 	}
 	return nil
+}
+
+// a "whole file" that comes back smaller than this fraction of the original is
+// treated as a truncation rather than a deletion: an incident fix that removes
+// half a file is the signature of a model that stopped copying and started
+// summarising. Growth is never checked, because added code cannot delete code.
+const minWholeFraction = 0.5
+
+// stand-ins a model leaves where the rest of the file should be. The check
+// requires a comment prefix, an ellipsis and one of these phrases, because any
+// one of them can appear in legitimate code — "rest of the file" inside a log
+// string, "..." in a TODO — and the combination is the truncation signature.
+var truncationStandins = []string{
+	"rest unchanged", "remains unchanged", "rest is unchanged", "unchanged below",
+	"rest of the file", "rest of the code", "rest of the function",
+	"rest of the class", "rest of the module", "rest of the implementation",
+	"remaining code", "remaining lines", "remaining functions",
+	"omitted for brevity", "elided for brevity",
+}
+
+// rejects edits that cannot possibly be the complete file. The prompt already
+// says "write the WHOLE file"; this makes that structural rather than advisory,
+// because the originals are the only reference that can see a truncation. A
+// build catches a prefix that stops mid-statement, but not one that is still
+// syntactically valid — a dropped trailing function compiles, and a service
+// with no test command would verify it as though the change were fine.
+func checkWholeFiles(edits []FileEdit, sources []Sourced, tree string) error {
+	byPath := make(map[string]Sourced, len(sources))
+	for _, s := range sources {
+		byPath[s.Path] = s
+	}
+	inTree := make(map[string]bool)
+	for line := range strings.SplitSeq(tree, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			inTree[p] = true
+		}
+	}
+
+	for _, e := range edits {
+		src, shown := byPath[e.Path]
+
+		switch {
+		case shown && src.TooLarge:
+			// the prompt says "too large to show or to rewrite. Do not edit it",
+			// but that is advisory and the model has no way to know the contents
+			// it never saw, so any rewrite is a blind replacement
+			return fmt.Errorf("remediation: %s is too large to rewrite and was not shown "+
+				"to the model; refusing to replace it with something it never read", e.Path)
+
+		case shown && !src.Missing && !src.TooLarge:
+			if orig, new := len(src.Contents), len(e.Contents); float64(new) < minWholeFraction*float64(orig) {
+				return fmt.Errorf("remediation: %s shrank from %d to %d bytes (%d%% of the original); "+
+					"a file block must contain the complete file, so this looks like a truncation",
+					e.Path, orig, new, 100*new/orig)
+			}
+			if line, ok := standInLine(e.Contents); ok {
+				return fmt.Errorf("remediation: %s contains a stand-in for the rest of the file (%q); "+
+					"a file block must contain the complete file", e.Path, clip(line, 120))
+			}
+
+		case !shown && inTree[e.Path]:
+			// in the tree, so it exists in the checkout, but it was never among the
+			// files the model was shown, so a rewrite would replace unseen code.
+			// A path beyond the tree's 300-line cap is simply not in the set, so
+			// this degrades to today's behaviour rather than misfiring.
+			return fmt.Errorf("remediation: %s exists in the checkout but was not shown to the "+
+				"model; a rewrite would replace code it never read", e.Path)
+		}
+		// a missing file being recreated is a new file, and a genuinely new path
+		// has nothing to be checked against
+	}
+	return nil
+}
+
+// the first line that is a stand-in for the rest of the file: a comment carrying
+// both an ellipsis and a truncation phrase. The stand-in must be a comment
+// because that is the only form that survives to the write — a bare ellipsis
+// line in real code is a syntax error the build rejects.
+func standInLine(contents string) (string, bool) {
+	for line := range strings.SplitSeq(contents, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || !hasCommentPrefix(t) {
+			continue
+		}
+		low := strings.ToLower(t)
+		if !strings.Contains(low, "...") && !strings.Contains(low, "…") {
+			continue
+		}
+		for _, phrase := range truncationStandins {
+			if strings.Contains(low, phrase) {
+				return t, true
+			}
+		}
+	}
+	return "", false
+}
+
+func hasCommentPrefix(t string) bool {
+	for _, p := range []string{"//", "#", "--", "/*", "*", "<!--"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // a repository-relative path that cannot escape the checkout
