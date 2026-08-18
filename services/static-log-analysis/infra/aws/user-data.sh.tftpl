@@ -1,16 +1,31 @@
 #!/bin/bash
 set -euxo pipefail
 
-dnf install -y docker awscli-2 openssl
+missing_packages=()
+command -v docker >/dev/null 2>&1 || missing_packages+=(docker)
+command -v aws >/dev/null 2>&1 || missing_packages+=(awscli-2)
+command -v openssl >/dev/null 2>&1 || missing_packages+=(openssl)
+command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
+if [ "$${#missing_packages[@]}" -gt 0 ]; then
+  dnf install -y "$${missing_packages[@]}"
+fi
 systemctl enable --now docker
 
 install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/static-log-analysis
 install -d -o root -g root -m 0700 /etc/static-log-analysis
-curl -fsSL \
-  https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-echo 'c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e  /usr/local/lib/docker/cli-plugins/docker-compose' | sha256sum --check
-chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+compose_plugin=/usr/local/lib/docker/cli-plugins/docker-compose
+compose_sha256=c372e512a36e67716b0b3a1264ccdc461dec7a7beff601b81f7c5fb008e3511e
+if ! printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check >/dev/null 2>&1; then
+  temporary_compose=$(mktemp /tmp/docker-compose.XXXXXX)
+  trap 'rm -f "$temporary_compose"' EXIT
+  curl -fsSL \
+    https://github.com/docker/compose/releases/download/v5.1.2/docker-compose-linux-x86_64 \
+    -o "$temporary_compose"
+  printf '%s  %s\n' "$compose_sha256" "$temporary_compose" | sha256sum --check
+  install -o root -g root -m 0755 "$temporary_compose" "$compose_plugin"
+  rm -f "$temporary_compose"
+  trap - EXIT
+fi
 docker compose version
 
 printf '%s' '${compose_base64}' | base64 --decode | gzip --decompress > /opt/static-log-analysis/compose.yaml

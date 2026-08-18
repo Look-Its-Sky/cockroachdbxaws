@@ -135,3 +135,57 @@ uses a bounded health gate, and restores the prior digest selection on failure.
 This follow-up describes implemented code, not live release evidence; the ECR
 apply, image publication, bootstrap refresh, cutover, and public dashboard
 verification still need to succeed before the AWS application is accepted.
+
+## Immutable-image release attempt
+
+The infrastructure and publication portions subsequently completed from the
+`integration` branch. The reviewed Terraform plan contained six creates, two
+in-place changes, and zero destroys: three private ECR repositories and their
+retention policies were created, while only the service pull policy and stored
+EC2 bootstrap metadata changed. A fresh post-apply plan reported zero drift.
+No instance, disk, Elastic IP association, queue, or database was replaced.
+
+Three Linux/amd64 artifacts from commit `939c239` were published under the same
+immutable commit tag and resolved to registry digests. The publisher was made
+credential-isolated and resumable after the first workstation lacked Buildx
+and a later execution window interrupted a dashboard push. The successful run
+left no ECR login in the operator's normal Docker configuration.
+
+The existing host required a one-time bootstrap refresh. Its full historical
+bootstrap wedged during already-satisfied package/tool setup and was cancelled;
+a verified narrow refresh installed the new Compose file, configured exact ECR
+repository boundaries, cutover helper, and systemd release environment without
+touching the durable volumes or secrets. The repository bootstrap is now
+idempotent so future refreshes skip installed packages and a checksum-valid
+Compose plugin.
+
+The application cutover was not accepted. Both database migrations completed
+and outbox became healthy, but the CloudWatch worker did not expose its admin
+listener within the 120-second startup window. Consequently the dashboard was
+held before startup and the public HTTPS check returned no response. Because
+this was the first digest-based release, there was no prior digest selection to
+restore; the helper stopped the failed candidate rather than claim a rollback.
+After reboot, CloudWatch and outbox containers ran again, but CloudWatch still
+did not answer readiness and systemd returned to failed state.
+
+Further diagnosis was blocked by the host's unreliable SSM channel. Commands
+could run during a brief post-reboot window, then new commands remained pending
+and no fresh heartbeat arrived during a complete bounded observation interval,
+even while both EC2 system and instance checks stayed green. A direct Session
+Manager session also failed to become interactive and was explicitly
+terminated. No inbound SSH rule was opened and no additional reboot was issued
+after that bounded audit.
+
+Current honest state:
+
+- Terraform is converged and all three immutable release artifacts exist;
+- the root-only release selection points at the published candidate;
+- migrations succeeded and outbox was observed healthy;
+- CloudWatch startup and the dashboard remain unaccepted;
+- the agent application is still not deployed; and
+- no automated remediation is enabled.
+
+The next operator action is to restore a reliable management channel, collect
+the CloudWatch container's startup log and categorical exit/OOM state, and fix
+that cause before retrying systemd. Do not delete or recreate the journal,
+checkpoint volume, dashboard-auth volume, queues, instance, or either database.

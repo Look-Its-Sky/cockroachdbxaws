@@ -212,6 +212,11 @@ sudo bash /tmp/static-log-analysis-bootstrap
 rm -f /tmp/static-log-analysis-bootstrap
 ```
 
+This refresh is idempotent for host tooling: it installs Docker, the AWS CLI,
+OpenSSL, or curl only when their commands are absent, and it downloads Compose
+only when the installed plugin does not match the pinned checksum. Embedded
+deployment files and units are still refreshed on every run.
+
 Then deploy the publisher's exact values inside the Session Manager shell:
 
 ```bash

@@ -120,14 +120,20 @@ production secret/database input file was absent. The sanitized evidence and
 the required prebuilt-image milestone are in
 `docs/deployment/aws-release-attempt-2026-08-17.md`.
 
-The prebuilt-image milestone is implemented but not yet accepted on AWS.
+The prebuilt-image milestone is implemented and its infrastructure/artifacts
+are deployed, but the application is not yet accepted on AWS.
 Terraform owns separate immutable, scan-on-push ECR repositories for the
 analysis, dashboard, and dashboard-admin artifacts; the host has repository-
 scoped pull access. Production Compose now requires digest-pinned images, the
 off-host publisher builds every artifact from one clean commit, and the host
 cutover performs pre-pull verification, migrations, bounded health checks, and
-automatic rollback to the prior release file. The live ECR apply, publication,
-in-place bootstrap refresh, and application cutover remain release work.
+automatic rollback to the prior release file. The ECR apply, publication, and
+in-place file refresh completed. The first cutover did not: migrations and
+outbox succeeded, CloudWatch never exposed readiness, the dashboard stayed
+held, and the host's SSM channel stopped producing fresh heartbeats before the
+container startup cause could be collected. The failed candidate remains the
+root-only release selection because no older digest release exists. See the
+immutable-image follow-up in `docs/deployment/aws-release-attempt-2026-08-17.md`.
 
 Local integration is available through `compose.local-integration.yaml`. It
 joins the static-analysis Compose network, creates a separate agent database

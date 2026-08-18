@@ -125,6 +125,23 @@ func TestAWSBootstrapCompressesEmbeddedDeploymentFiles(t *testing.T) {
 	}
 }
 
+func TestAWSBootstrapRefreshSkipsSatisfiedHostTooling(t *testing.T) {
+	bootstrap := readProductionFile(t, "infra/aws/user-data.sh.tftpl")
+	for _, required := range []string{
+		`command -v docker`,
+		`command -v aws`,
+		`command -v openssl`,
+		`command -v curl`,
+		`if [ "$${#missing_packages[@]}" -gt 0 ]`,
+		`if ! printf '%s  %s\n' "$compose_sha256" "$compose_plugin" | sha256sum --check`,
+		`install -o root -g root -m 0755 "$temporary_compose" "$compose_plugin"`,
+	} {
+		if !strings.Contains(bootstrap, required) {
+			t.Errorf("in-place bootstrap refresh does not contain %q", required)
+		}
+	}
+}
+
 func TestAWSServiceBootstrapChangesPreserveTheEncryptedInstanceDisk(t *testing.T) {
 	main := readProductionFile(t, "infra/aws/main.tf")
 	service := terraformResourceBlock(t, main, `resource "aws_instance" "service"`)
