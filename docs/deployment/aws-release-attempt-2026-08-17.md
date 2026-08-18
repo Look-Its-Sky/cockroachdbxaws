@@ -208,6 +208,21 @@ is accepted only after the repaired immutable image is published, the host
 deployment files are refreshed, CloudWatch and dashboard health pass, and the
 public HTTPS endpoint returns an authenticated dashboard response.
 
+The first repaired cutover from commit `897a0f0` was not accepted. Although it
+stopped retaining encoded envelopes, its cross-reference maps still grew with
+the total journal record count. The 2 GiB host stopped reporting SSM heartbeats
+about forty seconds after cutover began, and the deployment command never
+produced success evidence. No journal, checkpoint, secret, authentication data,
+queue, database, or instance disk was deleted.
+
+The follow-up removes all whole-journal verification maps. Records, state
+indexes, batches, live references, historical references, quarantine entries,
+and transition reserves are now validated in key order with bounded Pebble
+point/prefix lookups. Full durable-envelope decoding and policy validation still
+occur exactly once per record, and the existing corruption matrix continues to
+pass. This constant-workspace follow-up must be published and cut over before
+the application can be accepted.
+
 Current honest state:
 
 - Terraform is converged and all three immutable release artifacts exist;

@@ -1565,24 +1565,16 @@ func startupVerificationRecordFrom(stored storedRecord) startupVerificationRecor
 
 func (j *Journal) verify() error {
 	var calculated uint64
+	var calculatedPriorities [4]uint64
 	iter, err := j.db.NewIter(nil)
 	if err != nil {
 		return err
 	}
 	defer iter.Close()
-	records := map[string]startupVerificationRecord{}
-	pending := map[string]string{}
-	claims := map[string]string{}
-	committed := map[string]string{}
-	batches := map[string]storedBatch{}
-	refs := map[string]map[string]bool{}
-	originalRefs := map[string]map[string]bool{}
-	reserves := map[string]bool{}
-	quarantines := map[string]bool{}
 	var manifests [5]bool
 	for iter.First(); iter.Valid(); iter.Next() {
-		k := append([]byte(nil), iter.Key()...)
-		v := append([]byte(nil), iter.Value()...)
+		k := iter.Key()
+		v := iter.Value()
 		switch {
 		case bytes.Equal(k, keyFormat):
 			if !bytes.Equal(v, formatValue()) {
@@ -1643,34 +1635,37 @@ func (j *Journal) verify() error {
 			if err != nil || semantic != r.semantic {
 				return errDecode
 			}
-			records[id] = startupVerificationRecordFrom(r)
+			calculatedPriorities[int(r.priority)]++
+			if err := j.verifyRecordReferences(id, startupVerificationRecordFrom(r)); err != nil {
+				return err
+			}
 		case nsPending:
-			_, _, id, ok := parsePendingKey(k)
+			priority, received, id, ok := parsePendingKey(k)
 			if !ok || len(v) != 0 {
 				return errDecode
 			}
-			if _, exists := pending[id]; exists {
+			record, found, err := j.loadRecord(id)
+			if err != nil || !found || record.state != StatePending || record.priority != priority || !record.received.Equal(received) || !bytes.Equal(k, pendingKey(record.priority, record.received, id)) {
 				return errDecode
 			}
-			pending[id] = string(k)
 		case nsClaim:
-			_, id, ok := parseTimedKey(k, nsClaim)
+			expires, id, ok := parseTimedKey(k, nsClaim)
 			if !ok || len(v) != 0 {
 				return errDecode
 			}
-			if _, exists := claims[id]; exists {
+			record, found, err := j.loadRecord(id)
+			if err != nil || !found || record.state != StateClaimed || !record.claimExpiry.Equal(expires) || !bytes.Equal(k, claimKey(record.claimExpiry, id)) {
 				return errDecode
 			}
-			claims[id] = string(k)
 		case nsCommitted:
-			_, id, ok := parseTimedKey(k, nsCommitted)
+			committedAt, id, ok := parseTimedKey(k, nsCommitted)
 			if !ok || len(v) != 0 {
 				return errDecode
 			}
-			if _, exists := committed[id]; exists {
+			record, found, err := j.loadRecord(id)
+			if err != nil || !found || record.state != StateCommitted || !record.committedAt.Equal(committedAt) || !bytes.Equal(k, committedKey(record.committedAt, id)) {
 				return errDecode
 			}
-			committed[id] = string(k)
 		case nsBatch:
 			id, rest, ok := readComponent(k[2:])
 			if !ok || len(rest) != 0 || !validIdentifier(id, MaxBoundaryBytes) {
@@ -1680,31 +1675,34 @@ func (j *Journal) verify() error {
 			if err != nil {
 				return err
 			}
-			if len(batch.live) == 0 {
+			if len(batch.live) == 0 || j.validateStoredBatch(id, batch) != nil {
 				return errDecode
 			}
-			batches[id] = batch
 		case nsBatchRef:
-			id, batch, ok := parseTwoComponentKey(k, nsBatchRef)
+			id, batchID, ok := parseTwoComponentKey(k, nsBatchRef)
 			if !ok || len(v) != 0 {
 				return errDecode
 			}
-			if refs[id] == nil {
-				refs[id] = map[string]bool{}
+			record, found, err := j.loadRecord(id)
+			batchValue, batchFound, batchErr := get(j.db, batchKey(batchID))
+			batch, decodeErr := decodeBatch(batchValue)
+			member, memberFound := batchMemberByID(batch, id)
+			if err != nil || !found || batchErr != nil || !batchFound || decodeErr != nil || !memberFound || !containsString(batch.live, id) || member.semantic != record.semantic || member.priority != record.priority {
+				return errDecode
 			}
-			refs[id][batch] = true
 		case nsBatchOriginalRef:
-			id, batch, ok := parseTwoComponentKey(k, nsBatchOriginalRef)
+			id, batchID, ok := parseTwoComponentKey(k, nsBatchOriginalRef)
 			if !ok || len(v) != 0 {
 				return errDecode
 			}
-			if originalRefs[id] == nil {
-				originalRefs[id] = map[string]bool{}
-			}
-			if originalRefs[id][batch] {
+			batchValue, found, err := get(j.db, batchKey(batchID))
+			batch, decodeErr := decodeBatch(batchValue)
+			if err != nil || !found || decodeErr != nil {
 				return errDecode
 			}
-			originalRefs[id][batch] = true
+			if _, found := batchMemberByID(batch, id); !found {
+				return errDecode
+			}
 		case nsQuarantine:
 			id, rest, ok := readComponent(k[2:])
 			if !ok || len(rest) != 0 || !validRecordID(id) {
@@ -1714,16 +1712,15 @@ func (j *Journal) verify() error {
 			if err != nil || metadata.recordID != id {
 				return errDecode
 			}
-			if quarantines[id] {
+			if _, found, err := j.loadRecord(id); err != nil || found {
 				return errDecode
 			}
-			quarantines[id] = true
 		case nsTransitionReserve:
 			id, rest, ok := readComponent(k[2:])
-			if !ok || len(rest) != 0 || !bytes.Equal(v, reserveValue()) || reserves[id] {
+			record, found, err := j.loadRecord(id)
+			if !ok || len(rest) != 0 || !bytes.Equal(v, reserveValue()) || err != nil || !found || record.state != StatePending {
 				return errDecode
 			}
-			reserves[id] = true
 		default:
 			return errDecode
 		}
@@ -1739,119 +1736,46 @@ func (j *Journal) verify() error {
 	if calculated != j.usage {
 		return errDecode
 	}
-	var calculatedPriorities [4]uint64
-	for _, r := range records {
-		calculatedPriorities[int(r.priority)]++
-	}
 	if calculatedPriorities != j.priorities {
 		return errDecode
 	}
-	for id, r := range records {
-		if quarantines[id] {
+	return nil
+}
+
+func (j *Journal) verifyRecordReferences(id string, record startupVerificationRecord) error {
+	var indexKey []byte
+	switch record.state {
+	case StatePending:
+		indexKey = pendingKey(record.priority, record.received, id)
+	case StateClaimed:
+		indexKey = claimKey(record.claimExpiry, id)
+		if record.claimToken != claimToken(j.cfg.Owner, record.claimOwner, id, record.attempt, record.claimExpiry) {
 			return errDecode
 		}
-		indexes := 0
-		if pending[id] != "" {
-			indexes++
-		}
-		if claims[id] != "" {
-			indexes++
-		}
-		if committed[id] != "" {
-			indexes++
-		}
-		if indexes != 1 {
-			return errDecode
-		}
-		if (r.state == StatePending) != (pending[id] != "") || (r.state == StateClaimed) != (claims[id] != "") || (r.state == StateCommitted) != (committed[id] != "") {
-			return errDecode
-		}
-		var expected []byte
-		switch r.state {
-		case StatePending:
-			expected = pendingKey(r.priority, r.received, id)
-		case StateClaimed:
-			expected = claimKey(r.claimExpiry, id)
-		case StateCommitted:
-			expected = committedKey(r.committedAt, id)
-		}
-		actual := pending[id]
-		if r.state == StateClaimed {
-			actual = claims[id]
-		} else if r.state == StateCommitted {
-			actual = committed[id]
-		}
-		if actual != string(expected) {
-			return errDecode
-		}
-		if len(refs[id]) == 0 {
-			return errDecode
-		}
-		if len(refs[id]) > j.cfg.MaxBatchRefs {
-			return errDecode
-		}
-		if len(originalRefs[id]) == 0 || len(originalRefs[id]) > j.cfg.MaxBatchRefs {
-			return errDecode
-		}
-		if (r.state == StatePending) != reserves[id] {
-			return errDecode
-		}
-		if r.state == StateClaimed && r.claimToken != claimToken(j.cfg.Owner, r.claimOwner, id, r.attempt, r.claimExpiry) {
-			return errDecode
-		}
+	case StateCommitted:
+		indexKey = committedKey(record.committedAt, id)
+	default:
+		return errDecode
 	}
-	for id := range reserves {
-		if _, ok := records[id]; !ok {
-			return errDecode
-		}
+	value, found, err := get(j.db, indexKey)
+	if err != nil || !found || len(value) != 0 {
+		return errDecode
 	}
-	for batchID, batch := range batches {
-		for _, member := range batch.original {
-			if !originalRefs[member.recordID][batchID] {
-				return errDecode
-			}
-			record, found := records[member.recordID]
-			if containsString(batch.live, member.recordID) {
-				if !found {
-					return errDecode
-				}
-				if record.semantic != member.semantic || record.priority != member.priority || !refs[member.recordID][batchID] {
-					return errDecode
-				}
-			} else {
-				if refs[member.recordID][batchID] {
-					return errDecode
-				}
-				if found && (record.semantic != member.semantic || record.priority != member.priority) {
-					return errDecode
-				}
-			}
-		}
+	_, quarantined, err := get(j.db, quarantineKey(id))
+	if err != nil || quarantined {
+		return errDecode
 	}
-	for id, byBatch := range refs {
-		if _, ok := records[id]; !ok {
-			return errDecode
-		}
-		for batchID := range byBatch {
-			batch, ok := batches[batchID]
-			if !ok || !containsString(batch.live, id) {
-				return errDecode
-			}
-		}
+	_, reserved, err := get(j.db, transitionReserveKey(id))
+	if err != nil || reserved != (record.state == StatePending) {
+		return errDecode
 	}
-	for id, byBatch := range originalRefs {
-		if len(byBatch) > j.cfg.MaxBatchRefs {
-			return errDecode
-		}
-		for batchID := range byBatch {
-			batch, ok := batches[batchID]
-			if !ok {
-				return errDecode
-			}
-			if _, found := batchMemberByID(batch, id); !found {
-				return errDecode
-			}
-		}
+	refs, err := j.batchRefs(id)
+	if err != nil || len(refs) == 0 || len(refs) > j.cfg.MaxBatchRefs {
+		return errDecode
+	}
+	historical, err := j.validateHistoricalIdentity(id, record.semantic, record.priority)
+	if err != nil || historical == 0 || historical > j.cfg.MaxBatchRefs {
+		return errDecode
 	}
 	return nil
 }

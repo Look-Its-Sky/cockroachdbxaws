@@ -142,8 +142,11 @@ AWS follow-up on 2026-08-18 recovered the management channel and traced the
 CloudWatch readiness failure to the full Pebble journal verifier retaining every
 decoded envelope during startup. The repair retains only bounded verification
 metadata while preserving the corruption checks and gives this recovery path a
-distinct bounded health window. Publication, cutover, and public dashboard
-acceptance remain release evidence to collect; see
+distinct bounded health window. A first repaired cutover showed that the
+remaining whole-journal cross-reference maps could still starve the 2 GiB host;
+the follow-up now validates those relationships with constant-workspace Pebble
+lookups. Publication, cutover, and public dashboard acceptance remain release
+evidence to collect; see
 `docs/deployment/aws-release-attempt-2026-08-17.md`.
 
 Local integration is available through `compose.local-integration.yaml`. It
